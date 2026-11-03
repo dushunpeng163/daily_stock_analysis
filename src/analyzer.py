@@ -2066,8 +2066,8 @@ class GeminiAnalyzer:
     "buy_reason": "操作理由，引用交易理念",
 
     "trend_analysis": "走势形态分析",
-    "short_term_outlook": "短期1-3日展望",
-    "medium_term_outlook": "中期1-2周展望",
+    "short_term_outlook": "未来1周（5个交易日）走势推演：明确给出看涨/看跌/震荡方向、预计运行区间（支撑位~阻力位）、关键触发条件与减仓/加仓应对方案",
+    "medium_term_outlook": "未来1个月（20个交易日）中线趋势预判：结合均线斜率、量能结构、估值与产业催化，明确中线主方向、目标空间、反转信号与持仓周期策略",
     "technical_analysis": "技术面综合分析",
     "ma_analysis": "均线系统分析",
     "volume_analysis": "量能分析",
@@ -2254,8 +2254,8 @@ class GeminiAnalyzer:
     "buy_reason": "操作理由，引用激活技能或风险框架",
 
     "trend_analysis": "走势形态分析",
-    "short_term_outlook": "短期1-3日展望",
-    "medium_term_outlook": "中期1-2周展望",
+    "short_term_outlook": "未来1周（5个交易日）走势推演：明确给出看涨/看跌/震荡方向、预计运行区间（支撑位~阻力位）、关键触发条件与减仓/加仓应对方案",
+    "medium_term_outlook": "未来1个月（20个交易日）中线趋势预判：结合均线斜率、量能结构、估值与产业催化，明确中线主方向、目标空间、反转信号与持仓周期策略",
     "technical_analysis": "技术面综合分析",
     "ma_analysis": "均线系统分析",
     "volume_analysis": "量能分析",
