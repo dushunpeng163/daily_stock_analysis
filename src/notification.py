@@ -1489,6 +1489,23 @@ class NotificationService(
 
                 self._append_phase_decision_block(report_lines, dashboard, labels)
 
+                # ========== 未来 1 周 / 1 个月前瞻预判 ==========
+                st_outlook = getattr(result, "short_term_outlook", "")
+                mt_outlook = getattr(result, "medium_term_outlook", "")
+                t_analysis = getattr(result, "trend_analysis", "")
+                if st_outlook or mt_outlook or t_analysis:
+                    report_lines.extend([
+                        "### 🔮 未来走势前瞻预判（1周 / 1个月）",
+                        "",
+                    ])
+                    if st_outlook:
+                        report_lines.append(f"- **📅 未来 1 周推演**：{st_outlook}")
+                    if mt_outlook:
+                        report_lines.append(f"- **📆 未来 1 个月中线预判**：{mt_outlook}")
+                    if t_analysis:
+                        report_lines.append(f"- **📉 形态与趋势结构**：{t_analysis}")
+                    report_lines.append("")
+
                 # ========== 作战计划 ==========
                 battle = dashboard.get('battle_plan', {}) if dashboard else {}
                 if battle:
