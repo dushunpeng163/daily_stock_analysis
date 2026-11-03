@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""ntfy notification sender."""
+"""ntfy notification sender with automatic chunking to prevent HTTP 413."""
 
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from urllib.parse import unquote, urlparse, urlunparse
 
 import requests
@@ -15,6 +16,8 @@ from src.formatters import strip_hidden_markdown_metadata
 
 
 logger = logging.getLogger(__name__)
+
+_MAX_NTFY_CHUNK_BYTES = 3400
 
 
 def resolve_ntfy_endpoint(ntfy_url: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -48,6 +51,47 @@ def resolve_ntfy_endpoint(ntfy_url: Optional[str]) -> Tuple[Optional[str], Optio
     return server_url, topic
 
 
+def _split_markdown_chunks(text: str, max_bytes: int = _MAX_NTFY_CHUNK_BYTES) -> List[str]:
+    if len(text.encode("utf-8")) <= max_bytes:
+        return [text]
+
+    chunks: List[str] = []
+    current_lines: List[str] = []
+    current_bytes = 0
+
+    for line in text.split("\n"):
+        line_bytes = len((line + "\n").encode("utf-8"))
+        if line_bytes > max_bytes:
+            if current_lines:
+                chunks.append("\n".join(current_lines).strip())
+                current_lines = []
+                current_bytes = 0
+            # Hard-split overly long single line by characters
+            buf = ""
+            for ch in line:
+                if len((buf + ch).encode("utf-8")) > max_bytes:
+                    chunks.append(buf)
+                    buf = ch
+                else:
+                    buf += ch
+            if buf:
+                chunks.append(buf)
+            continue
+
+        if current_bytes + line_bytes > max_bytes and current_lines:
+            chunks.append("\n".join(current_lines).strip())
+            current_lines = [line]
+            current_bytes = line_bytes
+        else:
+            current_lines.append(line)
+            current_bytes += line_bytes
+
+    if current_lines:
+        chunks.append("\n".join(current_lines).strip())
+
+    return [c for c in chunks if c]
+
+
 class NtfySender:
     """Send Markdown text notifications through the ntfy JSON publish API."""
 
@@ -69,7 +113,7 @@ class NtfySender:
         *,
         timeout_seconds: Optional[float] = None,
     ) -> bool:
-        """Publish a notification to ntfy using a JSON body with UTF-8 text."""
+        """Publish a notification to ntfy using a JSON body with UTF-8 text (auto-chunked)."""
         if not self._is_ntfy_configured():
             logger.warning("ntfy URL 未配置，跳过推送")
             return False
@@ -83,6 +127,8 @@ class NtfySender:
             date_str = datetime.now().strftime("%Y-%m-%d")
             title = f"📈 股票分析报告 - {date_str}"
         sanitized_content = strip_hidden_markdown_metadata(content).strip()
+        chunks = _split_markdown_chunks(sanitized_content)
+        total = len(chunks)
 
         headers = {
             "Content-Type": "application/json; charset=utf-8",
@@ -92,36 +138,32 @@ class NtfySender:
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
-        payload = {
-            "topic": topic,
-            "title": title,
-            "message": sanitized_content,
-            "markdown": True,
-        }
+        all_ok = True
+        for idx, chunk in enumerate(chunks, start=1):
+            chunk_title = title if total == 1 else f"{title} ({idx}/{total})"
+            payload = {
+                "topic": topic,
+                "title": chunk_title,
+                "message": chunk,
+                "markdown": True,
+            }
+            try:
+                response = requests.post(
+                    server_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=timeout_seconds or 10,
+                    verify=self._webhook_verify_ssl,
+                )
+                if 200 <= response.status_code < 300:
+                    logger.info("ntfy 消息发送成功 (%d/%d)", idx, total)
+                else:
+                    logger.error("ntfy 请求失败 (%d/%d): HTTP %s", idx, total, response.status_code)
+                    all_ok = False
+                if idx < total:
+                    time.sleep(1.0)
+            except Exception as exc:
+                logger.error("发送 ntfy 消息失败 (%d/%d): %s", idx, total, exc)
+                all_ok = False
 
-        try:
-            response = requests.post(
-                server_url,
-                json=payload,
-                headers=headers,
-                timeout=timeout_seconds or 10,
-                verify=self._webhook_verify_ssl,
-            )
-            if 200 <= response.status_code < 300:
-                logger.info("ntfy 消息发送成功")
-                return True
-
-            logger.error("ntfy 请求失败: HTTP %s", response.status_code)
-            logger.debug("ntfy 响应内容: %s", response.text)
-            return False
-        except requests.exceptions.Timeout:
-            logger.error("发送 ntfy 消息失败: 请求超时")
-            return False
-        except requests.exceptions.RequestException as exc:
-            logger.error("发送 ntfy 消息失败: 网络请求异常")
-            logger.debug("ntfy 请求异常类型: %s", type(exc).__name__)
-            return False
-        except Exception as exc:
-            logger.error("发送 ntfy 消息失败: 未知异常")
-            logger.debug("ntfy 未知异常类型: %s", type(exc).__name__)
-            return False
+        return all_ok
