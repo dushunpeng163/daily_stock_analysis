@@ -4,7 +4,7 @@
 选股发现：全市场量化初筛（DSA 选股引擎）→ 排除已在自选的 → ATR 风控点位 → 推送到 ntfy。
 
 环境变量：
-  SCREEN_STRATEGIES  逗号分隔的策略 id，默认 momentum_quality,shrink_pullback,balanced_alpha
+  SCREEN_STRATEGIES  逗号分隔的策略 id，默认 momentum_quality,balanced_alpha
   SCREEN_TOP_N       每套策略取前 N（默认 10）
   SCREEN_MAX_CARDS   最终推送的候选数上限，全部做完整 DSA 分析（默认 8）
   SCREEN_REVIEW      1=基本面过滤 + AI 复核（默认 1）；SCREEN_DEEP=1 做完整分析（默认 1）
@@ -70,7 +70,7 @@ def run_strategies(strategies, top_n, extra, cfg):
         res = None
         for use_llm in (False,):
             try:
-                kw = {"daily_enrich_max_candidates": int(os.getenv("SCREEN_ENRICH_MAX", "150"))} if sid in DAILY_HEAVY else {}
+                kw = {"daily_enrich_max_candidates": int(os.getenv("SCREEN_ENRICH_MAX", "160"))}
                 res = screen(sid, market="cn", max_output=top_n + extra, use_llm=use_llm, daily_enrich=True, config=cfg, **kw)
                 break
             except Exception as exc:  # noqa: BLE001
@@ -437,8 +437,8 @@ def post_all(cards, server_url, topic, token):
 
 
 def main() -> int:
-    strategies = [s.strip() for s in os.getenv("SCREEN_STRATEGIES", "momentum_quality,shrink_pullback,balanced_alpha").split(",") if s.strip()]
-    top_n = int(os.getenv("SCREEN_TOP_N", "30"))
+    strategies = [s.strip() for s in os.getenv("SCREEN_STRATEGIES", "momentum_quality,balanced_alpha").split(",") if s.strip()]
+    top_n = int(os.getenv("SCREEN_TOP_N", "100"))
     max_cards = int(os.getenv("SCREEN_MAX_CARDS", "8"))
     watch = {digits(c) for c in os.getenv("STOCK_LIST", "").split(",") if c.strip()}
     log.info("策略=%s top_n=%s 已有自选=%d 只", strategies, top_n, len(watch))
@@ -460,7 +460,7 @@ def main() -> int:
 
     cand = [v for v in ranked if maybe_up(v["pick"])]
     log.info("日线特征预筛：%d → %d 只（剔除明显空头）", len(ranked), len(cand))
-    pre = cand[:80]
+    pre = cand[:100]
 
     def _plan(item):
         item["plan"], item["extras"] = build_plan(item["pick"].code, item["pick"])
@@ -476,11 +476,11 @@ def main() -> int:
     rest.sort(key=key)
     log.info("可入场/观察 %d 只，空头/不出手 %d 只", len(good), len(rest))
     pre = good + (rest[: max(0, 8 - len(good))] if len(good) < 8 else [])
-    # 行业分散：同一行业（金融类合并）最多 3 只
+    # 行业分散：同一行业（金融类合并）最多 2 只
     per_sector, final = Counter(), []
     for it in pre:
         k = sector_key(it["pick"])
-        if per_sector[k] >= 3:
+        if per_sector[k] >= 2:
             continue
         per_sector[k] += 1
         final.append(it)
