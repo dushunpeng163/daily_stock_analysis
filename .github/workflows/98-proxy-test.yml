@@ -1,0 +1,29 @@
+name: 转发测试
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 经 Cloudflare 转发访问东方财富
+        env:
+          URL: ${{ secrets.EM_PROXY_URL }}
+          KEY: ${{ secrets.EM_PROXY_KEY }}
+        run: |
+          echo "== 无密钥(应 403)"
+          curl -s -m 20 -o /dev/null -w "%{http_code}\n" "$URL/p/push2his.eastmoney.com/" || true
+          for path in \
+            "push2his.eastmoney.com/api/qt/stock/kline/get?secid=1.600519&fields1=f1&fields2=f51,f53&klt=101&fqt=0&end=20500101&lmt=2" \
+            "push2.eastmoney.com/api/qt/stock/get?secid=1.600519&fields=f43,f58" \
+            "push2.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=3&klt=101&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56&secid=1.600519" \
+            "push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=3&klt=101&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56&secid=1.600519" ; do
+            echo "== $path"
+            curl -s -m 25 -D /tmp/h.txt -o /tmp/b.txt -H "x-proxy-key: $KEY" "$URL/p/$path" || echo "curl failed: $?"
+            rg -i "^HTTP/|x-upstream-status|x-cf-colo|x-elapsed" /tmp/h.txt 2>/dev/null || grep -iE "^HTTP/|x-upstream-status|x-cf-colo|x-elapsed" /tmp/h.txt
+            head -c 300 /tmp/b.txt; echo
+          done
+          echo "== 对照：GitHub 直连东方财富"
+          curl -s -m 15 -o /dev/null -w "%{http_code}\n" "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=3&klt=101&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56&secid=1.600519" || echo "直连失败: $?"
