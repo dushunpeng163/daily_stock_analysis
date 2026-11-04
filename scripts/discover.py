@@ -4,7 +4,7 @@
 选股发现：全市场量化初筛（DSA 选股引擎）→ 排除已在自选的 → ATR 风控点位 → 推送到 ntfy。
 
 环境变量：
-  SCREEN_STRATEGIES  逗号分隔的策略 id，默认 momentum_quality,quality_value,balanced_alpha
+  SCREEN_STRATEGIES  逗号分隔的策略 id，默认 momentum_quality,shrink_pullback,volume_breakout,balanced_alpha
   SCREEN_TOP_N       每套策略取前 N（默认 10）
   SCREEN_MAX_CARDS   最终推送的候选数上限（默认 20）
   STOCK_LIST         已在自选里的代码，会被排除
@@ -46,6 +46,7 @@ LABELS = {
     "blue_chip_income": "蓝筹收益",
     "dual_low": "双低选股",
     "capital_heat": "资金热度",
+    "volume_breakout": "放量突破",
 }
 VERDICT_ORDER = {"ok": 0, "wait": 1, "weak": 2, "skip": 3}
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://dushunpeng163.github.io/TrendRadar/").rstrip("/") + "/"
@@ -218,7 +219,7 @@ def post_all(cards, server_url, topic, token):
 
 
 def main() -> int:
-    strategies = [s.strip() for s in os.getenv("SCREEN_STRATEGIES", "momentum_quality,quality_value,balanced_alpha").split(",") if s.strip()]
+    strategies = [s.strip() for s in os.getenv("SCREEN_STRATEGIES", "momentum_quality,shrink_pullback,volume_breakout,balanced_alpha").split(",") if s.strip()]
     top_n = int(os.getenv("SCREEN_TOP_N", "10"))
     max_cards = int(os.getenv("SCREEN_MAX_CARDS", "20"))
     watch = {digits(c) for c in os.getenv("STOCK_LIST", "").split(",") if c.strip()}
@@ -237,7 +238,14 @@ def main() -> int:
     for item in pre:
         item["plan"], item["extras"] = build_plan(item["pick"].code, item["pick"])
         time.sleep(0.5)
-    pre.sort(key=lambda v: (-len(v["hits"]), VERDICT_ORDER.get((v["plan"] or {}).get("verdict"), 4), -v["pick"].final_score))
+    # 能出手的优先；空头排列(skip)的先剔除，好标的太少时才补位
+    good = [v for v in pre if (v["plan"] or {}).get("verdict") in ("ok", "wait", "weak")]
+    rest = [v for v in pre if v not in good]
+    key = lambda v: (VERDICT_ORDER.get((v["plan"] or {}).get("verdict"), 4), -len(v["hits"]), -v["pick"].final_score)
+    good.sort(key=key)
+    rest.sort(key=key)
+    log.info("可入场/观察 %d 只，空头/不出手 %d 只", len(good), len(rest))
+    pre = good + (rest[: max(0, 8 - len(good))] if len(good) < 8 else [])
     # 行业分散：同一行业（金融类合并）最多 3 只
     per_sector, final = Counter(), []
     for it in pre:
