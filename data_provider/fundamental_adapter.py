@@ -357,7 +357,7 @@ def _fetch_stock_flow_via_proxy(market: str, code: str) -> Dict[str, Any]:
         "lmt": 10, "klt": 101, "fields1": "f1,f2,f3,f7", "fields2": "f51,f52,f53,f54,f55,f56",
         "ut": "b2884a393a59ad64002292a3e90d46a5", "secid": secid,
     }
-    for attempt in range(3):
+    for attempt in range(5):
         if attempt:
             time.sleep(1.5 * attempt)
         try:
