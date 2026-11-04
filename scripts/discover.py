@@ -4,7 +4,7 @@
 选股发现：全市场量化初筛（DSA 选股引擎）→ 排除已在自选的 → ATR 风控点位 → 推送到 ntfy。
 
 环境变量：
-  SCREEN_STRATEGIES  逗号分隔的策略 id，默认 momentum_quality,shrink_pullback,volume_breakout,balanced_alpha
+  SCREEN_STRATEGIES  逗号分隔的策略 id，默认 momentum_quality,shrink_pullback,balanced_alpha
   SCREEN_TOP_N       每套策略取前 N（默认 10）
   SCREEN_MAX_CARDS   最终推送的候选数上限，全部做完整 DSA 分析（默认 8）
   SCREEN_REVIEW      1=基本面过滤 + AI 复核（默认 1）；SCREEN_DEEP=1 做完整分析（默认 1）
@@ -50,6 +50,7 @@ LABELS = {
     "capital_heat": "资金热度",
     "volume_breakout": "放量突破",
 }
+DAILY_HEAVY = {"shrink_pullback", "volume_breakout", "low_volatility_quality", "oversold_reversal"}  # 硬条件依赖日线指标，需要多补算一些候选
 VERDICT_ORDER = {"ok": 0, "wait": 1, "weak": 2, "skip": 3}
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://dushunpeng163.github.io/TrendRadar/").rstrip("/") + "/"
 
@@ -67,9 +68,10 @@ def run_strategies(strategies, top_n, extra, cfg):
     hits = {}
     for sid in strategies:
         res = None
-        for use_llm in (True, False):
+        for use_llm in (False,):
             try:
-                res = screen(sid, market="cn", max_output=top_n + extra, use_llm=use_llm, daily_enrich=True, config=cfg)
+                kw = {"daily_enrich_max_candidates": int(os.getenv("SCREEN_ENRICH_MAX", "150"))} if sid in DAILY_HEAVY else {}
+                res = screen(sid, market="cn", max_output=top_n + extra, use_llm=use_llm, daily_enrich=True, config=cfg, **kw)
                 break
             except Exception as exc:  # noqa: BLE001
                 log.warning("策略 %s (use_llm=%s) 失败: %s", sid, use_llm, exc)
@@ -330,7 +332,8 @@ def deep_analyze(items):
         from src.core.pipeline import StockAnalysisPipeline
         from src.formatters import strip_hidden_markdown_metadata
 
-        pipeline = StockAnalysisPipeline(config=get_config(), max_workers=1, query_source="cli")
+        pipeline = StockAnalysisPipeline(config=get_config(), max_workers=1, query_source="cli",
+                                         daily_market_context_enabled=False, daily_market_context_allow_generate=False)
         codes = [digits(it["pick"].code) for it in items]
         results = pipeline.run(stock_codes=codes, send_notification=False) or []
         log.info("完整分析完成 %d/%d 只", len(results), len(codes))
@@ -434,14 +437,14 @@ def post_all(cards, server_url, topic, token):
 
 
 def main() -> int:
-    strategies = [s.strip() for s in os.getenv("SCREEN_STRATEGIES", "momentum_quality,shrink_pullback,volume_breakout,balanced_alpha").split(",") if s.strip()]
-    top_n = int(os.getenv("SCREEN_TOP_N", "10"))
+    strategies = [s.strip() for s in os.getenv("SCREEN_STRATEGIES", "momentum_quality,shrink_pullback,balanced_alpha").split(",") if s.strip()]
+    top_n = int(os.getenv("SCREEN_TOP_N", "30"))
     max_cards = int(os.getenv("SCREEN_MAX_CARDS", "8"))
     watch = {digits(c) for c in os.getenv("STOCK_LIST", "").split(",") if c.strip()}
     log.info("策略=%s top_n=%s 已有自选=%d 只", strategies, top_n, len(watch))
 
     cfg = None  # screen() 默认加载选股引擎自己的配置
-    hits = run_strategies(strategies, top_n * 2, extra=len(watch), cfg=cfg)
+    hits = run_strategies(strategies, top_n, extra=len(watch), cfg=cfg)
     fresh = {c: v for c, v in hits.items() if digits(c) not in watch}
     log.info("候选 %d 只（排除自选后 %d 只）", len(hits), len(fresh))
     if not fresh:
@@ -449,10 +452,22 @@ def main() -> int:
         return 1
 
     # 先按共识度和评分预排，只给前 N*1.5 只算 ATR，节省数据源调用
-    pre = sorted(fresh.values(), key=lambda v: (-len(v["hits"]), -v["pick"].final_score))[: max(max_cards * 4, 30)]
-    for item in pre:
+    ranked = sorted(fresh.values(), key=lambda v: (-len(v["hits"]), -v["pick"].final_score))
+
+    def maybe_up(pk):
+        above, bull = getattr(pk, "price_above_ma20", None), getattr(pk, "ma_bullish", None)
+        return not (above is False and not bull)  # 明确在 MA20 下方且非多头排列 → 直接跳过
+
+    cand = [v for v in ranked if maybe_up(v["pick"])]
+    log.info("日线特征预筛：%d → %d 只（剔除明显空头）", len(ranked), len(cand))
+    pre = cand[:80]
+
+    def _plan(item):
         item["plan"], item["extras"] = build_plan(item["pick"].code, item["pick"])
-        time.sleep(0.5)
+        return item
+
+    with cf.ThreadPoolExecutor(max_workers=3) as ex:
+        list(ex.map(_plan, pre))
     # 能出手的优先；空头排列(skip)的先剔除，好标的太少时才补位
     good = [v for v in pre if (v["plan"] or {}).get("verdict") in ("ok", "wait", "weak")]
     rest = [v for v in pre if v not in good]
