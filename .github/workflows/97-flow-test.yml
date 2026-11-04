@@ -1,0 +1,33 @@
+name: 资金流测试
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: 调用资金流
+        env:
+          EM_PROXY_URL: ${{ secrets.EM_PROXY_URL }}
+          EM_PROXY_KEY: ${{ secrets.EM_PROXY_KEY }}
+        run: |
+          python - <<'PY'
+          import json, logging
+          logging.basicConfig(level=logging.INFO)
+          from data_provider.fundamental_adapter import AkshareFundamentalAdapter
+          a = AkshareFundamentalAdapter()
+          for code in ("601816", "600741", "000001"):
+              r = a.get_capital_flow(code)
+              print("RESULT", code, r.get("status"), "stock_flow=", r.get("stock_flow"), "chain=", r.get("source_chain"), "errors=", r.get("errors"))
+          PY
