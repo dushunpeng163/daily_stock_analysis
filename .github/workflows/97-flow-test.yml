@@ -23,11 +23,7 @@ jobs:
           EM_PROXY_KEY: ${{ secrets.EM_PROXY_KEY }}
         run: |
           python - <<'PY'
-          import json, logging
-          logging.basicConfig(level=logging.INFO)
-          from data_provider.fundamental_adapter import AkshareFundamentalAdapter
-          a = AkshareFundamentalAdapter()
-          for code in ("601816", "600741", "000001"):
-              r = a.get_capital_flow(code)
-              print("RESULT", code, r.get("status"), "stock_flow=", r.get("stock_flow"), "chain=", r.get("source_chain"), "errors=", r.get("errors"))
+          from data_provider.fundamental_adapter import _fetch_stock_flow_via_proxy
+          for market, code in (("sh", "601816"), ("sz", "000001"), ("sh", "600519")):
+              print("PROXY_RESULT", code, _fetch_stock_flow_via_proxy(market, code))
           PY
