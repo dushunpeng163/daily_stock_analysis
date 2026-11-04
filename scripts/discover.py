@@ -28,7 +28,6 @@ os.environ.setdefault("SCREENING_ENABLED", "true")
 
 import requests  # noqa: E402
 
-from src.config import Config  # noqa: E402
 from src.notification_sender.ntfy_sender import resolve_ntfy_endpoint  # noqa: E402
 from src.risk_levels import compute_risk_plan, render_risk_plan_markdown  # noqa: E402
 from src.services.screening.pipeline import screen  # noqa: E402
@@ -173,7 +172,7 @@ def main() -> int:
     watch = {digits(c) for c in os.getenv("STOCK_LIST", "").split(",") if c.strip()}
     log.info("策略=%s top_n=%s 已有自选=%d 只", strategies, top_n, len(watch))
 
-    cfg = Config.from_env()
+    cfg = None  # screen() 默认加载选股引擎自己的配置
     hits = run_strategies(strategies, top_n, extra=len(watch), cfg=cfg)
     fresh = {c: v for c, v in hits.items() if digits(c) not in watch}
     log.info("候选 %d 只（排除自选后 %d 只）", len(hits), len(fresh))
