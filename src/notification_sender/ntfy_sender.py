@@ -194,6 +194,8 @@ class NtfySender:
             headers["Authorization"] = f"Bearer {token}"
 
         all_ok = True
+        started_at = int(time.time()) - 2
+        sent_payloads = []
         # Reverse send order so that in ntfy UI (newest on top), card 1 appears at the very top
         for send_idx, (card_title, card_body) in enumerate(reversed(cards), start=1):
             payload = {
@@ -206,6 +208,7 @@ class NtfySender:
             if link:
                 payload["click"] = link
                 payload["actions"] = [{"action": "view", "label": "打开看板", "url": link}]
+            sent_payloads.append(payload)
             try:
                 response = requests.post(
                     server_url,
@@ -225,4 +228,45 @@ class NtfySender:
                 logger.error("发送 ntfy 消息失败 (%d/%d): %s", send_idx, total, exc)
                 all_ok = False
 
+        try:
+            if not self._verify_and_resend(server_url, topic, headers, sent_payloads, started_at, timeout_seconds):
+                all_ok = False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ntfy 送达校验失败（忽略）: %s", exc)
+
         return all_ok
+
+    def _verify_and_resend(self, server_url, topic, headers, payloads, started_at, timeout_seconds) -> bool:
+        """ntfy.sh 偶发『返回 2xx 但未入库』。发完后回查并补发缺失的消息（最多 3 轮）。"""
+        import json
+        from collections import Counter
+
+        poll_url = f"{server_url.rstrip('/')}/{topic}/json?poll=1&since={started_at}"
+        poll_headers = {k: v for k, v in headers.items() if k == "Authorization"}
+        need = Counter(p["title"] for p in payloads)
+        for attempt in range(1, 4):
+            time.sleep(3 if attempt == 1 else 5)
+            resp = requests.get(poll_url, headers=poll_headers, timeout=20, verify=self._webhook_verify_ssl)
+            stored = Counter()
+            for line in resp.text.splitlines():
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if msg.get("event") == "message":
+                    stored[msg.get("title", "")] += 1
+            missing = Counter({t: n - stored.get(t, 0) for t, n in need.items() if n - stored.get(t, 0) > 0})
+            if not missing:
+                logger.info("ntfy 送达校验通过：%d 条全部入库", len(payloads))
+                return True
+            logger.warning("ntfy 送达校验：缺失 %d 条，第 %d 轮补发: %s", sum(missing.values()), attempt, list(missing)[:6])
+            for p in reversed(payloads):
+                if missing.get(p["title"], 0) > 0:
+                    missing[p["title"]] -= 1
+                    try:
+                        requests.post(server_url, json=p, headers=headers, timeout=timeout_seconds or 10, verify=self._webhook_verify_ssl)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("ntfy 补发失败: %s", exc)
+                    time.sleep(2.0)
+        logger.error("ntfy 送达校验：重试后仍有缺失")
+        return False
