@@ -372,11 +372,8 @@ def _fetch_stock_flow_via_proxy(market: str, code: str) -> Dict[str, Any]:
                 if v is not None and math.isfinite(v):
                     vals.append(v)
             if vals:
-                return {
-                    "main_net_inflow": vals[-1],
-                    "inflow_5d": sum(vals[-5:]),
-                    "inflow_10d": sum(vals[-10:]),
-                }
+                # 与直连路径口径一致：只给当日主力净流入（5/10 日留空，避免多空方向冲突被判成中性）
+                return {"main_net_inflow": vals[-1], "inflow_5d": None, "inflow_10d": None}
         except Exception as exc:  # noqa: BLE001
             logger.debug("资金流转发请求失败 %s: %s", code, exc)
     return {}
