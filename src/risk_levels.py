@@ -73,7 +73,11 @@ def compute_risk_plan(
     rr_entry = _rr(cap, entry)
     rr_now = _rr(cap, price)
 
-    if rr_now >= 2.0:
+    bearish = bool(ma5 and ma10 and ma20 and ma5 < ma10 < ma20)
+
+    if bearish:
+        verdict, verdict_text = "skip", "均线空头排列，逆势入场风险高，等趋势转强再考虑"
+    elif rr_now >= 2.0:
         verdict, verdict_text = "ok", "盈亏比合格，现价可按计划分批入场"
     elif rr_entry >= 2.0:
         verdict, verdict_text = "wait", f"现价追入盈亏比不足，等回踩 {_fmt(entry, price)} 附近再出手"
@@ -97,6 +101,7 @@ def compute_risk_plan(
         "rr_now": rr_now,
         "verdict": verdict,
         "verdict_text": verdict_text,
+        "bearish": bearish,
     }
 
 
