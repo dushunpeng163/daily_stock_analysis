@@ -164,9 +164,13 @@ def mv_text(mv):
 
 # ---------------- 基本面过滤 ----------------
 def fetch_fundamentals(codes):
+    """只取新浪财务摘要（GitHub 上 3 秒可达）；完整 bundle 里夹带的东方财富子请求会被断连并拖到超时。"""
     out = {}
     try:
-        from data_provider.fundamental_adapter import AkshareFundamentalAdapter
+        from data_provider.fundamental_adapter import (
+            AkshareFundamentalAdapter, _extract_latest_row, _financial_abstract_row, _normalize_report_date,
+            _pick_by_keywords, _safe_float, _DIVIDEND_KEYWORD_MAP,
+        )
 
         adapter = AkshareFundamentalAdapter()
     except Exception as exc:  # noqa: BLE001
@@ -174,23 +178,35 @@ def fetch_fundamentals(codes):
         return out
 
     def one(code):
-        b = adapter.get_fundamental_bundle(code) or {}
-        g = b.get("growth") or {}
-        fr = (b.get("earnings") or {}).get("financial_report") or {}
+        df, _src, _errs = adapter._call_df_candidates([
+            ("stock_financial_abstract", {"symbol": code}),
+            ("stock_financial_analysis_indicator", {"symbol": code}),
+        ])
+        if df is None:
+            raise RuntimeError("财务摘要为空")
+        row = _financial_abstract_row(df) if "指标" in df else _extract_latest_row(df, code)
+        if row is None:
+            raise RuntimeError("无可用报告期")
+        wide = "指标" in df
         return {
-            "roe": g.get("roe"), "profit_yoy": g.get("net_profit_yoy"), "rev_yoy": g.get("revenue_yoy"),
-            "gm": g.get("gross_margin"), "ocf": fr.get("operating_cash_flow"), "np": fr.get("net_profit_parent"),
-            "date": fr.get("report_date"),
+            "roe": _safe_float(_pick_by_keywords(row, ["净资产收益率", "ROE", "净资产收益"])),
+            "profit_yoy": _safe_float(_pick_by_keywords(row, ["净利润同比", "净利同比", "归母净利润同比"])),
+            "rev_yoy": _safe_float(_pick_by_keywords(row, ["营业收入同比", "营收同比", "收入同比", "同比增长"])),
+            "gm": _safe_float(_pick_by_keywords(row, ["毛利率"])),
+            "ocf": _safe_float(_pick_by_keywords(row, ["经营活动产生的现金流量净额", "经营现金流", "经营活动现金流"])),
+            "np": _safe_float(row.get("归母净利润") if wide else _pick_by_keywords(row, ["归母净利润", "母公司股东净利润", "净利润"])),
+            "date": _normalize_report_date(_pick_by_keywords(row, _DIVIDEND_KEYWORD_MAP["report_date"])),
         }
 
     ex = cf.ThreadPoolExecutor(max_workers=4)
     futs = {ex.submit(one, c): c for c in codes}
     for f, c in futs.items():
         try:
-            out[c] = f.result(timeout=75)
+            out[c] = f.result(timeout=40)
         except Exception as exc:  # noqa: BLE001
-            log.warning("%s 基本面获取失败: %s", c, exc)
+            log.warning("%s 基本面获取失败: %s %s", c, type(exc).__name__, exc)
     ex.shutdown(wait=False, cancel_futures=True)
+    log.info("基本面取到 %d/%d 只", len(out), len(codes))
     return out
 
 
