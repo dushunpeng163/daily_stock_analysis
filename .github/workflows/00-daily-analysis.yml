@@ -449,6 +449,8 @@ jobs:
           # 可选值: tencent, akshare_sina, efinance, akshare_em, tickflow, tushare
           # 如果有 TickFlow 或 Tushare Pro，可按权限把 tickflow / tushare 放在更靠前位置
           REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
+          EM_PROXY_URL: ${{ secrets.EM_PROXY_URL }}
+          EM_PROXY_KEY: ${{ secrets.EM_PROXY_KEY }}
           
         run: |
           # 解析自选股配置：
