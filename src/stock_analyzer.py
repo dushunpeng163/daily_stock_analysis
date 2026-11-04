@@ -132,6 +132,12 @@ class TrendAnalysisResult:
     signal_score: int = 0            # 综合评分 0-100
     signal_reasons: List[str] = field(default_factory=list)
     risk_factors: List[str] = field(default_factory=list)
+
+    # 波动率与波段结构（用于 ATR 风控点位）
+    atr14: float = 0.0               # 14 日平均真实波幅
+    swing_low_10: float = 0.0        # 近 10 日最低价
+    high_20: float = 0.0             # 近 20 日最高价
+    high_60: float = 0.0             # 近 60 日最高价（不足 60 日取全部）
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -256,6 +262,9 @@ class StockTrendAnalyzer:
 
         # 6. RSI 分析
         self._analyze_rsi(df, result)
+
+        # 6.5 ATR / 波段结构（风控点位依据）
+        self._calculate_atr(df, result)
 
         # 7. 生成买入信号
         self._generate_signal(result)
@@ -446,6 +455,26 @@ class StockTrendAnalyzer:
             result.volume_status = VolumeStatus.NORMAL
             result.volume_trend = "量能正常"
     
+    def _calculate_atr(self, df: pd.DataFrame, result: TrendAnalysisResult, period: int = 14) -> None:
+        """计算 ATR(period) 及近期高低点。数据缺列或不足时静默跳过。"""
+        try:
+            if not {"high", "low", "close"}.issubset(df.columns) or len(df) < period + 1:
+                return
+            high = df["high"].astype(float)
+            low = df["low"].astype(float)
+            prev_close = df["close"].astype(float).shift(1)
+            tr = pd.concat(
+                [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+            ).max(axis=1)
+            atr = tr.rolling(period).mean().iloc[-1]
+            if pd.notna(atr) and atr > 0:
+                result.atr14 = float(atr)
+            result.swing_low_10 = float(low.iloc[-10:].min())
+            result.high_20 = float(high.iloc[-20:].max())
+            result.high_60 = float(high.iloc[-60:].max())
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"{result.code} ATR 计算失败: {e}")
+
     def _analyze_support_resistance(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
         """
         分析支撑压力位
