@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from datetime import datetime
@@ -19,6 +20,22 @@ from src.formatters import strip_hidden_markdown_metadata
 logger = logging.getLogger(__name__)
 
 _MAX_NTFY_CHUNK_BYTES = 3400
+_DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://dushunpeng163.github.io/TrendRadar/").strip()
+_CARD_CODE_RE = re.compile(r"\(([A-Za-z0-9.]+)\)(?:\s*\(\d+/\d+\))?\s*$")
+
+
+def _dashboard_link(card_title: str) -> Optional[str]:
+    """Deep link into the dashboard: stock card -> that stock's detail, market review -> market tab."""
+    if not _DASHBOARD_URL:
+        return None
+    base = _DASHBOARD_URL.rstrip("/") + "/"
+    if "大盘复盘" in card_title:
+        return base + "#market"
+    if card_title.startswith("📈"):
+        m = _CARD_CODE_RE.search(card_title)
+        if m:
+            return base + "#" + m.group(1)
+    return base
 
 
 def resolve_ntfy_endpoint(ntfy_url: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -185,6 +202,10 @@ class NtfySender:
                 "message": card_body,
                 "markdown": True,
             }
+            link = _dashboard_link(card_title)
+            if link:
+                payload["click"] = link
+                payload["actions"] = [{"action": "view", "label": "打开看板", "url": link}]
             try:
                 response = requests.post(
                     server_url,
