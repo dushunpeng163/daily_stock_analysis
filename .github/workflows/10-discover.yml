@@ -1,0 +1,52 @@
+name: 选股发现
+
+on:
+  workflow_dispatch:
+    inputs:
+      strategies:
+        description: '策略 id，逗号分隔'
+        required: false
+        default: 'momentum_quality,quality_value,balanced_alpha'
+      top_n:
+        description: '每套策略取前 N'
+        required: false
+        default: '10'
+
+concurrency:
+  group: discover
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行选股发现
+        env:
+          SCREENING_ENABLED: 'true'
+          SCREEN_STRATEGIES: ${{ github.event.inputs.strategies || 'momentum_quality,quality_value,balanced_alpha' }}
+          SCREEN_TOP_N: ${{ github.event.inputs.top_n || '10' }}
+          STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || 'gemini-3.6-flash' }}
+          GEMINI_REQUEST_DELAY: '3.0'
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          TZ: Asia/Shanghai
+        run: |
+          mkdir -p data logs reports
+          python scripts/discover.py
