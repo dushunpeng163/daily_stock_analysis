@@ -89,13 +89,24 @@ def build_plan(code, pick):
 
         df, _ = DataFetcherManager().get_daily_data(code, days=90)
         if df is None or df.empty:
-            return None
+            return None, {}
         tr = StockTrendAnalyzer().analyze(df, code)
         price = float(pick.price or 0) or float(tr.current_price or 0)
-        return compute_risk_plan(price, tr.ma5, tr.ma10, tr.atr14, tr.high_20, tr.high_60, tr.ma20)
+        plan = compute_risk_plan(price, tr.ma5, tr.ma10, tr.atr14, tr.high_20, tr.high_60, tr.ma20)
+        # 与自选看板一致的「趋势 / 支撑位 / 压力位」
+        if tr.ma5 and tr.ma10 and tr.ma20 and tr.ma5 > tr.ma10 > tr.ma20:
+            trend = "看多"
+        elif tr.ma5 and tr.ma10 and tr.ma20 and tr.ma5 < tr.ma10 < tr.ma20:
+            trend = "看空"
+        else:
+            trend = "震荡"
+        below = [v for v in (tr.ma5, tr.ma10, tr.ma20, tr.swing_low_10) if v and v < price]
+        above = [v for v in (tr.high_20, tr.high_60) if v and v > price * 1.002]
+        extras = {"trend": trend, "support": max(below) if below else None, "resistance": min(above) if above else None}
+        return plan, extras
     except Exception as exc:  # noqa: BLE001
         log.warning("%s ATR 计划失败: %s", code, exc)
-        return None
+        return None, {}
 
 
 def fnum(v, nd=1):
@@ -155,6 +166,7 @@ def card_body(item) -> str:
         f"**命中策略**: {names}",
         f"**综合评分**: {p.final_score:.1f}",
         f"**行业**: {p.industry or '—'}",
+        f"**趋势**: {(item.get('extras') or {}).get('trend', '—')} | **支撑位**: {fnum((item.get('extras') or {}).get('support'), 3 if p.price < 20 else 2)} | **压力位**: {fnum((item.get('extras') or {}).get('resistance'), 3 if p.price < 20 else 2)}",
         f"**现价**: {p.price:.2f} | **涨跌**: {p.change_pct:+.2f}% | **PE**: {fnum(p.pe_ratio)} | **PB**: {fnum(p.pb_ratio, 2)} | **市值亿**: {mv_text(p.total_mv)}",
         "",
         f"**入选理由**: {reason_for(p)}",
@@ -223,7 +235,7 @@ def main() -> int:
     # 先按共识度和评分预排，只给前 N*1.5 只算 ATR，节省数据源调用
     pre = sorted(fresh.values(), key=lambda v: (-len(v["hits"]), -v["pick"].final_score))[: int(max_cards * 2.5)]
     for item in pre:
-        item["plan"] = build_plan(item["pick"].code, item["pick"])
+        item["plan"], item["extras"] = build_plan(item["pick"].code, item["pick"])
         time.sleep(0.5)
     pre.sort(key=lambda v: (-len(v["hits"]), VERDICT_ORDER.get((v["plan"] or {}).get("verdict"), 4), -v["pick"].final_score))
     # 行业分散：同一行业（金融类合并）最多 3 只
