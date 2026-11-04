@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -335,6 +337,51 @@ def _financial_abstract_row(df: pd.DataFrame) -> Optional[pd.Series]:
     return pd.Series(values)
 
 
+def _fetch_stock_flow_via_proxy(market: str, code: str) -> Dict[str, Any]:
+    """东方财富个股资金流直连被 GitHub 机房 IP 断开时，经自建转发（Cloudflare Worker）取数。
+
+    需要环境变量 EM_PROXY_URL / EM_PROXY_KEY；未配置则直接返回空。
+    klines 每行：日期, 主力净流入, 小单, 中单, 大单, 超大单（单位：元）。
+    """
+    base = os.getenv("EM_PROXY_URL", "").strip().rstrip("/")
+    key = os.getenv("EM_PROXY_KEY", "").strip()
+    if not base or not key:
+        return {}
+    try:
+        import requests
+    except Exception:
+        return {}
+    secid = ("1." if market == "sh" else "0.") + code
+    url = f"{base}/p/push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+    params = {
+        "lmt": 10, "klt": 101, "fields1": "f1,f2,f3,f7", "fields2": "f51,f52,f53,f54,f55,f56",
+        "ut": "b2884a393a59ad64002292a3e90d46a5", "secid": secid,
+    }
+    for attempt in range(3):
+        if attempt:
+            time.sleep(1.5 * attempt)
+        try:
+            resp = requests.get(url, params=params, headers={"x-proxy-key": key}, timeout=20)
+            if resp.status_code != 200:
+                continue
+            klines = ((resp.json().get("data") or {}).get("klines")) or []
+            vals = []
+            for line in klines:
+                parts = str(line).split(",")
+                v = _safe_float(parts[1]) if len(parts) > 1 else None
+                if v is not None and math.isfinite(v):
+                    vals.append(v)
+            if vals:
+                return {
+                    "main_net_inflow": vals[-1],
+                    "inflow_5d": sum(vals[-5:]),
+                    "inflow_10d": sum(vals[-10:]),
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("资金流转发请求失败 %s: %s", code, exc)
+    return {}
+
+
 class AkshareFundamentalAdapter:
     """AkShare adapter for fundamentals, capital flow and dragon-tiger signals."""
 
@@ -539,6 +586,12 @@ class AkshareFundamentalAdapter:
                         "inflow_10d": None,
                     }
                     result["source_chain"].append(f"capital_stock:{stock_source}")
+
+        if not result["stock_flow"]:
+            proxied = _fetch_stock_flow_via_proxy(market, stock_code)
+            if proxied:
+                result["stock_flow"] = proxied
+                result["source_chain"].append("capital_stock:em_proxy")
 
         sector_df, sector_source, sector_errors = self._call_df_candidates([
             ("stock_sector_fund_flow_rank", {}),
