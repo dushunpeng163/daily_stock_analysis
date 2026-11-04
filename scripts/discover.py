@@ -98,6 +98,46 @@ def build_plan(code, pick):
         return None
 
 
+def fnum(v, nd=1):
+    try:
+        return f"{float(v):.{nd}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def reason_for(p) -> str:
+    """LLM 重排不可用时，用评分因子拼一句可读理由。"""
+    if (p.ranking_reason or "").strip():
+        return clip(p.ranking_reason)
+    bits = []
+    if p.pe_ratio is not None and p.pb_ratio is not None:
+        bits.append(f"PE {fnum(p.pe_ratio)} / PB {fnum(p.pb_ratio, 2)}")
+    if p.ma_bullish:
+        bits.append("均线多头排列")
+    elif p.price_above_ma20:
+        bits.append("站上 MA20")
+    if p.macd_status:
+        bits.append(f"MACD {p.macd_status}")
+    if p.rsi_status:
+        bits.append(f"RSI {p.rsi_status}")
+    if p.change_60d is not None:
+        bits.append(f"近 60 日 {p.change_60d:+.1f}%")
+    if p.breakout_20d_pct is not None:
+        bits.append(f"距 20 日高点 {p.breakout_20d_pct:+.1f}%")
+    if p.volume_ratio is not None:
+        bits.append(f"量比 {fnum(p.volume_ratio, 2)}")
+    return "因子入选：" + "；".join(bits) if bits else "因子综合评分靠前"
+
+
+FIN_WORDS = ("银行", "证券", "保险", "信托", "期货", "海通", "中信", "平安", "人寿", "财险")
+
+
+def sector_key(p) -> str:
+    if p.industry:
+        return p.industry
+    return "金融" if any(w in p.name for w in FIN_WORDS) else f"other:{p.code}"
+
+
 def mv_text(mv):
     try:
         mv = float(mv)
@@ -115,9 +155,9 @@ def card_body(item) -> str:
         f"**命中策略**: {names}",
         f"**综合评分**: {p.final_score:.1f}",
         f"**行业**: {p.industry or '—'}",
-        f"**现价**: {p.price:.2f} | **涨跌**: {p.change_pct:+.2f}% | **PE**: {p.pe_ratio if p.pe_ratio is not None else '—'} | **PB**: {p.pb_ratio if p.pb_ratio is not None else '—'} | **市值亿**: {mv_text(p.total_mv)}",
+        f"**现价**: {p.price:.2f} | **涨跌**: {p.change_pct:+.2f}% | **PE**: {fnum(p.pe_ratio)} | **PB**: {fnum(p.pb_ratio, 2)} | **市值亿**: {mv_text(p.total_mv)}",
         "",
-        f"**入选理由**: {clip(p.ranking_reason)}",
+        f"**入选理由**: {reason_for(p)}",
         f"**风险提示**: {clip(p.risk_summary) or '—'}",
         "",
     ]
@@ -173,7 +213,7 @@ def main() -> int:
     log.info("策略=%s top_n=%s 已有自选=%d 只", strategies, top_n, len(watch))
 
     cfg = None  # screen() 默认加载选股引擎自己的配置
-    hits = run_strategies(strategies, top_n, extra=len(watch), cfg=cfg)
+    hits = run_strategies(strategies, top_n * 2, extra=len(watch), cfg=cfg)
     fresh = {c: v for c, v in hits.items() if digits(c) not in watch}
     log.info("候选 %d 只（排除自选后 %d 只）", len(hits), len(fresh))
     if not fresh:
@@ -181,12 +221,22 @@ def main() -> int:
         return 1
 
     # 先按共识度和评分预排，只给前 N*1.5 只算 ATR，节省数据源调用
-    pre = sorted(fresh.values(), key=lambda v: (-len(v["hits"]), -v["pick"].final_score))[: int(max_cards * 1.5)]
+    pre = sorted(fresh.values(), key=lambda v: (-len(v["hits"]), -v["pick"].final_score))[: int(max_cards * 2.5)]
     for item in pre:
         item["plan"] = build_plan(item["pick"].code, item["pick"])
         time.sleep(0.5)
     pre.sort(key=lambda v: (-len(v["hits"]), VERDICT_ORDER.get((v["plan"] or {}).get("verdict"), 4), -v["pick"].final_score))
-    final = pre[:max_cards]
+    # 行业分散：同一行业（金融类合并）最多 3 只
+    per_sector, final = Counter(), []
+    for it in pre:
+        k = sector_key(it["pick"])
+        if per_sector[k] >= 3:
+            continue
+        per_sector[k] += 1
+        final.append(it)
+        if len(final) >= max_cards:
+            break
+    log.info("行业分散后 %d 只：%s", len(final), dict(per_sector.most_common(6)))
 
     date = datetime.now().strftime("%m-%d")
     summary = [f"## 🔎 选股发现汇总 {date}", "", f"策略：{' · '.join(LABELS.get(s, s) for s in strategies)}（每套取前 {top_n}，已排除自选）", ""]
