@@ -6,7 +6,7 @@ on:
       strategies:
         description: '策略 id，逗号分隔'
         required: false
-        default: 'momentum_quality,quality_value,balanced_alpha'
+        default: 'momentum_quality,shrink_pullback,volume_breakout,balanced_alpha'
       top_n:
         description: '每套策略取前 N'
         required: false
@@ -36,7 +36,7 @@ jobs:
       - name: 运行选股发现
         env:
           SCREENING_ENABLED: 'true'
-          SCREEN_STRATEGIES: ${{ github.event.inputs.strategies || 'momentum_quality,quality_value,balanced_alpha' }}
+          SCREEN_STRATEGIES: ${{ github.event.inputs.strategies || 'momentum_quality,shrink_pullback,volume_breakout,balanced_alpha' }}
           SCREEN_TOP_N: ${{ github.event.inputs.top_n || '10' }}
           STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
