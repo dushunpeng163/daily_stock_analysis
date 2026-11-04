@@ -6,11 +6,11 @@ on:
       strategies:
         description: '策略 id，逗号分隔'
         required: false
-        default: 'momentum_quality,shrink_pullback,volume_breakout,balanced_alpha'
+        default: 'momentum_quality,shrink_pullback,balanced_alpha'
       top_n:
         description: '每套策略取前 N'
         required: false
-        default: '10'
+        default: '30'
       max_cards:
         description: '最终入选并做完整分析的数量'
         required: false
@@ -40,8 +40,10 @@ jobs:
       - name: 运行选股发现
         env:
           SCREENING_ENABLED: 'true'
-          SCREEN_STRATEGIES: ${{ github.event.inputs.strategies || 'momentum_quality,shrink_pullback,volume_breakout,balanced_alpha' }}
-          SCREEN_TOP_N: ${{ github.event.inputs.top_n || '10' }}
+          SCREEN_STRATEGIES: ${{ github.event.inputs.strategies || 'momentum_quality,shrink_pullback,balanced_alpha' }}
+          SCREEN_TOP_N: ${{ github.event.inputs.top_n || '30' }}
+          LLM_MAX_CANDIDATES: '80'
+          SCREEN_ENRICH_MAX: '150'
           SCREEN_MAX_CARDS: ${{ github.event.inputs.max_cards || '8' }}
           REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'full' }}
           REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || '' }}
