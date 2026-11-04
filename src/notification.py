@@ -1527,6 +1527,14 @@ class NotificationService(
                             f"| 🎊 {labels['take_profit_label']} | {self._clean_sniper_value(sniper.get('take_profit', 'N/A'))} |",
                             "",
                         ])
+                    # ATR 风险收益测算
+                    risk_plan = battle.get('risk_plan')
+                    if isinstance(risk_plan, dict) and risk_plan:
+                        try:
+                            from src.risk_levels import render_risk_plan_markdown
+                            report_lines.extend(render_risk_plan_markdown(risk_plan))
+                        except Exception:  # noqa: BLE001
+                            pass
                     # 仓位策略
                     position = battle.get('position_strategy', {})
                     if position:
