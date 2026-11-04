@@ -11,6 +11,10 @@ on:
         description: '每套策略取前 N'
         required: false
         default: '10'
+      max_cards:
+        description: '最终入选并做完整分析的数量'
+        required: false
+        default: '8'
 
 concurrency:
   group: discover
@@ -19,7 +23,7 @@ concurrency:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
@@ -38,6 +42,19 @@ jobs:
           SCREENING_ENABLED: 'true'
           SCREEN_STRATEGIES: ${{ github.event.inputs.strategies || 'momentum_quality,shrink_pullback,volume_breakout,balanced_alpha' }}
           SCREEN_TOP_N: ${{ github.event.inputs.top_n || '10' }}
+          SCREEN_MAX_CARDS: ${{ github.event.inputs.max_cards || '8' }}
+          REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'full' }}
+          REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || '' }}
+          REPORT_SHOW_LLM_MODEL: 'false'
+          SINGLE_STOCK_NOTIFY: 'false'
+          MAX_WORKERS: '1'
+          ENABLE_CHIP_DISTRIBUTION: 'false'
+          REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          BOCHA_API_KEYS: ${{ secrets.BOCHA_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+          BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
+          LOG_LEVEL: INFO
           STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
