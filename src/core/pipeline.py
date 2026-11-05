@@ -22,6 +22,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import List, Dict, Any, Optional, Tuple, Callable
+import os as _os
+
+
+def _history_days() -> int:
+    """日线拉取天数（交易日口径）。策略 V2 需要 120 日结构位，默认 30 以兼容旧行为，由 DAILY_HISTORY_DAYS 覆盖。"""
+    try:
+        return max(30, int(_os.getenv("DAILY_HISTORY_DAYS", "30")))
+    except ValueError:
+        return 30
 
 import pandas as pd
 
@@ -416,7 +425,7 @@ class StockAnalysisPipeline:
 
             # 从数据源获取数据
             logger.info(f"{stock_name}({code}) 开始从数据源获取数据...")
-            df, source_name = self.fetcher_manager.get_daily_data(code, days=30)
+            df, source_name = self.fetcher_manager.get_daily_data(code, days=_history_days())
 
             if df is None or df.empty:
                 return False, "获取数据为空"
@@ -644,7 +653,7 @@ class StockAnalysisPipeline:
                 _mkt = get_market_for_stock(normalize_stock_code(code))
                 frozen = get_frozen_target_date()
                 end_date = frozen if frozen else get_market_now(_mkt).date()
-                start_date = end_date - timedelta(days=89)  # ~60 trading days for MA60
+                start_date = end_date - timedelta(days=max(89, int(_history_days() * 1.8)))  # ≥ ~60 trading days for MA60；V2 结构位需要更长
                 historical_bars = self.db.get_data_range(code, start_date, end_date)
                 if historical_bars:
                     df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
@@ -3481,7 +3490,7 @@ class StockAnalysisPipeline:
         # === 批量预取实时行情（优化：避免每只股票都触发全量拉取）===
         # 只有股票数量 >= 5 时才进行预取，少量股票直接逐个查询更高效
         if len(stock_codes) >= 5:
-            daily_prefetch_count = self.fetcher_manager.prefetch_daily_klines(stock_codes, days=30)
+            daily_prefetch_count = self.fetcher_manager.prefetch_daily_klines(stock_codes, days=_history_days())
             if daily_prefetch_count > 0:
                 logger.info(
                     "[prefetch] component=daily_kline_prefetch action=complete "
