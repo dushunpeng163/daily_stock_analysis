@@ -18,7 +18,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from enum import Enum
 
 import pandas as pd
@@ -134,10 +134,19 @@ class TrendAnalysisResult:
     risk_factors: List[str] = field(default_factory=list)
 
     # 波动率与波段结构（用于 ATR 风控点位）
-    atr14: float = 0.0               # 14 日平均真实波幅
-    swing_low_10: float = 0.0        # 近 10 日最低价
-    high_20: float = 0.0             # 近 20 日最高价
-    high_60: float = 0.0             # 近 60 日最高价（不足 60 日取全部）
+    atr14: float = 0.0               # Wilder ATR(14)
+    swing_low_10: float = 0.0        # 近 10 日最低价（含当日）
+    high_20: float = 0.0             # 前 20 日最高价（不含当日）
+    high_60: float = 0.0             # 前 60 日最高价（不含当日，不足取全部）
+    swing_highs: List[float] = field(default_factory=list)  # 120 日内确认过的波段高点（高于前后各 2 日）
+    ma20_prev5: float = 0.0          # 5 日前的 MA20（判断 MA20 方向）
+    vol_ratio_20: float = 0.0        # 当日成交量 / 前 20 日均量
+    breakout_level: float = 0.0      # 近 5 日内放量突破时的前 20 日高点（0 = 无）
+    breakout_age: Optional[int] = None  # 距突破日的交易日数（0 = 当日）
+    last_open: float = 0.0
+    last_high: float = 0.0
+    last_low: float = 0.0
+    bars: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -456,22 +465,59 @@ class StockTrendAnalyzer:
             result.volume_trend = "量能正常"
     
     def _calculate_atr(self, df: pd.DataFrame, result: TrendAnalysisResult, period: int = 14) -> None:
-        """计算 ATR(period) 及近期高低点。数据缺列或不足时静默跳过。"""
+        """Wilder ATR(period) 与波段结构（前高、波段高点、突破检测、MA20 方向）。数据缺列或不足时静默跳过。"""
         try:
             if not {"high", "low", "close"}.issubset(df.columns) or len(df) < period + 1:
                 return
-            high = df["high"].astype(float)
-            low = df["low"].astype(float)
-            prev_close = df["close"].astype(float).shift(1)
+            high = df["high"].astype(float).reset_index(drop=True)
+            low = df["low"].astype(float).reset_index(drop=True)
+            close = df["close"].astype(float).reset_index(drop=True)
+            n = len(df)
+            prev_close = close.shift(1)
             tr = pd.concat(
                 [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
-            ).max(axis=1)
-            atr = tr.rolling(period).mean().iloc[-1]
-            if pd.notna(atr) and atr > 0:
+            ).max(axis=1).tolist()
+            # Wilder：首个 ATR = 前 period 个 TR 均值（跳过第 0 根，它没有昨收），之后 ATR = (前ATR×(p−1) + TR) / p
+            seed = tr[1:period + 1]
+            atr = sum(seed) / len(seed)
+            for v in tr[period + 1:]:
+                atr = (atr * (period - 1) + v) / period
+            if atr == atr and atr > 0:
                 result.atr14 = float(atr)
+            result.bars = n
+            result.last_open = float(df["open"].iloc[-1]) if "open" in df.columns else 0.0
+            result.last_high = float(high.iloc[-1])
+            result.last_low = float(low.iloc[-1])
             result.swing_low_10 = float(low.iloc[-10:].min())
-            result.high_20 = float(high.iloc[-20:].max())
-            result.high_60 = float(high.iloc[-60:].max())
+            prev_high = high.iloc[:-1]
+            if len(prev_high):
+                result.high_20 = float(prev_high.iloc[-20:].max())
+                result.high_60 = float(prev_high.iloc[-60:].max())
+            # 120 日内确认过的波段高点：高于前 2 日与后 2 日的最高价（最近 2 根尚未确认）
+            sh = []
+            for i in range(max(2, n - 120), n - 2):
+                h = high.iloc[i]
+                if h > max(high.iloc[i - 2], high.iloc[i - 1], high.iloc[i + 1], high.iloc[i + 2]):
+                    sh.append(float(h))
+            result.swing_highs = sh
+            if "MA20" in df.columns and n >= 6:
+                v = df["MA20"].iloc[-6]
+                result.ma20_prev5 = float(v) if pd.notna(v) else 0.0
+            if "volume" in df.columns:
+                vol = df["volume"].astype(float).reset_index(drop=True)
+                avg20 = vol.iloc[-21:-1].mean() if n >= 21 else 0.0
+                result.vol_ratio_20 = float(vol.iloc[-1] / avg20) if avg20 and avg20 > 0 else 0.0
+                # 近 5 日内是否出现「收盘 > 前 20 日最高价 且 成交量 ≥ 20 日均量×1.5」的突破
+                for k in range(0, 5):
+                    i = n - 1 - k
+                    if i < 21:
+                        break
+                    lvl = float(high.iloc[i - 20:i].max())
+                    v20 = float(vol.iloc[i - 20:i].mean())
+                    if close.iloc[i] > lvl and v20 > 0 and vol.iloc[i] >= 1.5 * v20:
+                        result.breakout_level = lvl
+                        result.breakout_age = k
+                        break
         except Exception as e:  # noqa: BLE001
             logger.warning(f"{result.code} ATR 计算失败: {e}")
 
