@@ -51,7 +51,12 @@ LABELS = {
     "volume_breakout": "放量突破",
 }
 DAILY_HEAVY = {"shrink_pullback", "volume_breakout", "low_volatility_quality", "oversold_reversal"}  # 硬条件依赖日线指标，需要多补算一些候选
-VERDICT_ORDER = {"ok": 0, "wait": 1, "weak": 2, "skip": 3}
+VERDICT_ORDER = {"ok": 0, "wait": 1, "watch": 2, "weak": 2, "expired": 3, "skip": 4, "na": 5}
+STATE_ICON = {"ok": "✅", "wait": "⏳", "watch": "👀", "expired": "⌛", "skip": "❌", "na": "➖"}
+
+
+def plan_state(plan) -> str:
+    return (plan or {}).get("state") or (plan or {}).get("verdict") or ""
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://dushunpeng163.github.io/TrendRadar/").rstrip("/") + "/"
 
 
@@ -92,12 +97,12 @@ def build_plan(code, pick):
     try:
         from data_provider import DataFetcherManager
 
-        df, _ = DataFetcherManager().get_daily_data(code, days=90)
+        df, _ = DataFetcherManager().get_daily_data(code, days=130)
         if df is None or df.empty:
             return None, {}
         tr = StockTrendAnalyzer().analyze(df, code)
         price = float(pick.price or 0) or float(tr.current_price or 0)
-        plan = compute_risk_plan(price, tr.ma5, tr.ma10, tr.atr14, tr.high_20, tr.high_60, tr.ma20)
+        plan = compute_risk_plan(price, tr, code=code, name=pick.name or "")
         # 与自选看板一致的「趋势 / 支撑位 / 压力位」
         if tr.ma5 and tr.ma10 and tr.ma20 and tr.ma5 > tr.ma10 > tr.ma20:
             trend = "看多"
@@ -292,7 +297,8 @@ def llm_review(items, funds):
             "市值亿": mv_text(p.total_mv), "ROE%": _f(f.get("roe")), "净利润同比%": _f(f.get("profit_yoy")), "营收同比%": _f(f.get("rev_yoy")),
             "毛利率%": _f(f.get("gm")), "经营现金流为正": (None if _f(f.get("ocf")) is None else _f(f.get("ocf")) > 0),
             "趋势": (it.get("extras") or {}).get("trend"), "近60日涨幅%": _f(getattr(p, "change_60d", None)),
-            "命中策略": [LABELS.get(s, s) for s, _ in it["hits"]], "入场盈亏比(回踩)": (it.get("plan") or {}).get("rr_entry"),
+            "命中策略": [LABELS.get(s, s) for s, _ in it["hits"]], "策略类型": (it.get("plan") or {}).get("strategy_label"),
+            "量化状态": plan_state(it.get("plan")), "计划盈亏比": (it.get("plan") or {}).get("rr_plan"),
         })
     prompt = (
         "你是严谨的 A 股买方研究员。下面是量化初筛得到的候选股及其客观数据。请只依据所给数据和你对这些公司的已知常识，"
@@ -403,7 +409,7 @@ def make_cards(it, deep):
     d = deep.get(digits(p.code))
     if d:
         summary, body = d
-        head = card_body(it, with_plan="风险收益测算" not in body)
+        head = card_body(it, with_plan=("交易计划 V2" not in body and "风险收益测算" not in body))
         content = head + ("\n\n" + summary if summary else "") + "\n\n" + body
     else:
         content = card_body(it)
@@ -484,10 +490,10 @@ def main() -> int:
 
     with cf.ThreadPoolExecutor(max_workers=3) as ex:
         list(ex.map(_plan, pre))
-    # 能出手的优先；空头排列(skip)的先剔除，好标的太少时才补位
-    good = [v for v in pre if (v["plan"] or {}).get("verdict") in ("ok", "wait", "weak")]
+    # 能出手/可观察的优先；skip（趋势不满足、止损异常、盈亏比不足）先剔除，好标的太少时才补位
+    good = [v for v in pre if plan_state(v["plan"]) in ("ok", "wait", "watch", "weak")]
     rest = [v for v in pre if v not in good]
-    key = lambda v: (VERDICT_ORDER.get((v["plan"] or {}).get("verdict"), 4), -len(v["hits"]), -v["pick"].final_score)
+    key = lambda v: (VERDICT_ORDER.get(plan_state(v["plan"]), 6), -len(v["hits"]), -v["pick"].final_score)
     good.sort(key=key)
     rest.sort(key=key)
     log.info("可入场/观察 %d 只，空头/不出手 %d 只", len(good), len(rest))
@@ -527,7 +533,7 @@ def main() -> int:
         if len(kept) >= 3:
             final = kept
         av = {"跟踪": 0, "观望": 1, "": 2}
-        final.sort(key=lambda v: (av.get((v.get("ai") or {}).get("verdict", ""), 2), VERDICT_ORDER.get((v["plan"] or {}).get("verdict"), 4),
+        final.sort(key=lambda v: (av.get((v.get("ai") or {}).get("verdict", ""), 2), VERDICT_ORDER.get(plan_state(v["plan"]), 6),
                                   -v.get("fund_q", 0), -len(v["hits"]), -v["pick"].final_score))
     final = final[:max_cards]
     deep = deep_analyze(final) if os.getenv("SCREEN_DEEP", "1") != "0" else {}
@@ -536,9 +542,10 @@ def main() -> int:
     summary = [f"## 🔎 选股发现汇总 {date}", "", f"策略：{' · '.join(LABELS.get(s, s) for s in strategies)}（每套取前 {top_n}，已排除自选）", ""]
     for i, it in enumerate(final, 1):
         p, pl = it["pick"], it["plan"]
-        v = {"ok": "✅", "wait": "⏳", "weak": "⚠️", "skip": "❌"}.get((pl or {}).get("verdict"), "·")
+        v = STATE_ICON.get(plan_state(pl), "·")
         ai = (it.get("ai") or {}).get("verdict")
-        summary.append(f"{i}. {v} **{p.name}({p.code})** {('AI ' + ai + ' | ') if ai else ''}命中{len(it['hits'])}套 | {it.get('fund_line') or ''}")
+        strat = (pl or {}).get("strategy_label") or ""
+        summary.append(f"{i}. {v} **{p.name}({p.code})** {(strat + ' | ') if strat and strat != '无' else ''}{('AI ' + ai + ' | ') if ai else ''}命中{len(it['hits'])}套 | {it.get('fund_line') or ''}")
     cards = [(f"🔎 选股发现汇总 {date}", "\n".join(summary), DASHBOARD_URL + "#discover")]
     for it in final:
         cards.extend(make_cards(it, deep))
