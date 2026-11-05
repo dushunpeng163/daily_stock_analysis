@@ -451,6 +451,10 @@ jobs:
           REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
           EM_PROXY_URL: ${{ secrets.EM_PROXY_URL }}
           EM_PROXY_KEY: ${{ secrets.EM_PROXY_KEY }}
+          # 策略 V2：账户规模（仓位反推）、日线历史长度（120 日结构位）、市场状态（阶段 2 接入）
+          ACCOUNT_SIZE: ${{ vars.ACCOUNT_SIZE || '100000' }}
+          DAILY_HISTORY_DAYS: '130'
+          MARKET_STATE: ${{ vars.MARKET_STATE || 'unknown' }}
           
         run: |
           # 解析自选股配置：
