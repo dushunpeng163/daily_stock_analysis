@@ -237,7 +237,11 @@ def compute_risk_plan(
     if h60 > 0:
         cands.append((h60, "前60日高点"))
     cands += [(v, "120日内波段高点") for v in swing_highs]
-    cands = [(v, lb) for v, lb in cands if v > entry + TARGET_MIN_GAP_ATR * atr]
+    floor_ = entry + TARGET_MIN_GAP_ATR * atr
+    if strategy == "breakout":
+        # 突破后的新高不是压力；目标必须高于「突破日至今的最高价」，否则视为上方无结构（追踪止损）
+        floor_ = max(floor_, g("breakout_high") or 0.0, price)
+    cands = [(v, lb) for v, lb in cands if v > floor_]
     target, target_label = (min(cands, key=lambda x: x[0]) if cands else (None, ""))
     trailing = target is None
     rr_plan = (target - entry) / risk if target else None
@@ -274,7 +278,10 @@ def compute_risk_plan(
                 state, text = "watch", f"计划盈亏比 1:{rr_plan:.2f} 在 1.5～2 之间，仅观察"
     else:  # breakout
         if price > zone_hi:
-            state, text = "wait", f"突破后未回踩，等回踩突破位 {_fmt(zone_lo, price)}～{_fmt(zone_hi, price)}"
+            if rr_plan is None or rr_plan >= RR_WAIT_PLAN:
+                state, text = "wait", f"突破后未回踩，等回踩突破位 {_fmt(zone_lo, price)}～{_fmt(zone_hi, price)}"
+            else:
+                state, text = "watch", f"计划盈亏比 1:{rr_plan:.2f} 在 1.5～2 之间，回踩突破位时仅观察"
         elif price >= zone_lo:
             if rr_now is None or rr_now >= RR_OK_NOW:
                 state, text = "ok", "价格回到突破位附近，可按计划入场"
