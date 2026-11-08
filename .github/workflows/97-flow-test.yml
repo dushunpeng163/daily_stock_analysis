@@ -4,26 +4,31 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
       - name: Install
-        run: pip install -q requests pandas akshare
+        run: |
+          pip install -q requests pandas akshare tenacity fake_useragent
       - name: Test capital flow + proxy fallback
         env:
           EM_PROXY_URL: ${{ secrets.EM_PROXY_URL }}
           EM_PROXY_KEY: ${{ secrets.EM_PROXY_KEY }}
         run: |
           python - <<'PY'
-          import os, logging
+          import os, logging, sys
           logging.basicConfig(level=logging.INFO, format="%(message)s")
           print("EM_PROXY_URL set=", bool(os.getenv("EM_PROXY_URL")), "KEY set=", bool(os.getenv("EM_PROXY_KEY")))
-          from data_provider.fundamental_adapter import AkshareFundamentalAdapter, _fetch_stock_flow_via_proxy
+          # 直接加载文件，避开 data_provider 包初始化链
+          import importlib.util
+          spec = importlib.util.spec_from_file_location("fa", "data_provider/fundamental_adapter.py")
+          fa = importlib.util.module_from_spec(spec); sys.modules["fa"]=fa; spec.loader.exec_module(fa)
           for market, code in (("sh","600763"),("sz","000661"),("sz","000568"),("sh","600519")):
-              print("PROXY_ONLY", code, _fetch_stock_flow_via_proxy(market, code, attempts=3))
+              print("PROXY_ONLY", code, fa._fetch_stock_flow_via_proxy(market, code, attempts=3))
+          from data_provider.fundamental_adapter import AkshareFundamentalAdapter
           ad = AkshareFundamentalAdapter()
           for code in ("SH600763","SZ000661","SZ000568","600519"):
               r = ad.get_capital_flow(code)
