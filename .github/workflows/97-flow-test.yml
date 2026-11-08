@@ -1,0 +1,31 @@
+name: 资金流代理回归
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install -q requests pandas akshare
+      - name: Test capital flow + proxy fallback
+        env:
+          EM_PROXY_URL: ${{ secrets.EM_PROXY_URL }}
+          EM_PROXY_KEY: ${{ secrets.EM_PROXY_KEY }}
+        run: |
+          python - <<'PY'
+          import os, logging
+          logging.basicConfig(level=logging.INFO, format="%(message)s")
+          print("EM_PROXY_URL set=", bool(os.getenv("EM_PROXY_URL")), "KEY set=", bool(os.getenv("EM_PROXY_KEY")))
+          from data_provider.fundamental_adapter import AkshareFundamentalAdapter, _fetch_stock_flow_via_proxy
+          for market, code in (("sh","600763"),("sz","000661"),("sz","000568"),("sh","600519")):
+              print("PROXY_ONLY", code, _fetch_stock_flow_via_proxy(market, code, attempts=3))
+          ad = AkshareFundamentalAdapter()
+          for code in ("SH600763","SZ000661","SZ000568","600519"):
+              r = ad.get_capital_flow(code)
+              print("ADAPTER", code, "status=", r.get("status"), "stock_flow=", r.get("stock_flow"), "chain=", r.get("source_chain"), "errors=", (r.get("errors") or [])[:3])
+          PY
