@@ -337,8 +337,8 @@ def _financial_abstract_row(df: pd.DataFrame) -> Optional[pd.Series]:
     return pd.Series(values)
 
 
-def _fetch_stock_flow_via_proxy(market: str, code: str) -> Dict[str, Any]:
-    """东方财富个股资金流直连被 GitHub 机房 IP 断开时，经自建转发（Cloudflare Worker）取数。
+def _fetch_stock_flow_via_proxy(market: str, code: str, *, attempts: int = 3) -> Dict[str, Any]:
+    """东方财富个股资金流直连失败/超时时，经自建转发（Cloudflare Worker）取数。
 
     需要环境变量 EM_PROXY_URL / EM_PROXY_KEY；未配置则直接返回空。
     klines 每行：日期, 主力净流入, 小单, 中单, 大单, 超大单（单位：元）。
@@ -351,18 +351,27 @@ def _fetch_stock_flow_via_proxy(market: str, code: str) -> Dict[str, Any]:
         import requests
     except Exception:
         return {}
-    secid = ("1." if market == "sh" else "0.") + code
+    m = (market or "").lower()
+    if m.startswith("sh") or m == "1":
+        secid = "1." + code
+    elif m.startswith("sz") or m == "0":
+        secid = "0." + code
+    else:
+        # 兜底：6 开头上交所，其余深交所
+        secid = ("1." if str(code).startswith("6") else "0.") + code
     url = f"{base}/p/push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
     params = {
         "lmt": 10, "klt": 101, "fields1": "f1,f2,f3,f7", "fields2": "f51,f52,f53,f54,f55,f56",
         "ut": "b2884a393a59ad64002292a3e90d46a5", "secid": secid,
     }
-    for attempt in range(5):
+    last_err = ""
+    for attempt in range(max(1, attempts)):
         if attempt:
-            time.sleep(1.5 * attempt)
+            time.sleep(0.8 * attempt)
         try:
-            resp = requests.get(url, params=params, headers={"x-proxy-key": key}, timeout=20)
+            resp = requests.get(url, params=params, headers={"x-proxy-key": key}, timeout=12)
             if resp.status_code != 200:
+                last_err = f"http_{resp.status_code}"
                 continue
             klines = ((resp.json().get("data") or {}).get("klines")) or []
             vals = []
@@ -372,10 +381,13 @@ def _fetch_stock_flow_via_proxy(market: str, code: str) -> Dict[str, Any]:
                 if v is not None and math.isfinite(v):
                     vals.append(v)
             if vals:
+                logger.info("[em_proxy] %s secid=%s ok main_net_inflow=%.0f", code, secid, vals[-1])
                 # 与直连路径口径一致：只给当日主力净流入（5/10 日留空，避免多空方向冲突被判成中性）
                 return {"main_net_inflow": vals[-1], "inflow_5d": None, "inflow_10d": None}
+            last_err = "empty_klines"
         except Exception as exc:  # noqa: BLE001
-            logger.debug("资金流转发请求失败 %s: %s", code, exc)
+            last_err = f"{type(exc).__name__}:{exc}"
+    logger.warning("[em_proxy] %s secid=%s failed after %s: %s", code, secid, attempts, last_err)
     return {}
 
 
@@ -584,8 +596,9 @@ class AkshareFundamentalAdapter:
                     }
                     result["source_chain"].append(f"capital_stock:{stock_source}")
 
+        # 个股资金流优先：直连失败后立刻走 Cloudflare，再去拉板块资金流（板块接口慢，会吃光 8s 预算）
         if not result["stock_flow"]:
-            proxied = _fetch_stock_flow_via_proxy(market, stock_code)
+            proxied = _fetch_stock_flow_via_proxy(market, stock_code, attempts=2)
             if proxied:
                 result["stock_flow"] = proxied
                 result["source_chain"].append("capital_stock:em_proxy")
