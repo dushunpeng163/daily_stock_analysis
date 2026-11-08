@@ -4535,7 +4535,10 @@ class DataFetcherManager:
             )
             result_ctx["status"] = "partial"
         else:
+            # 至少留给资金流一条快路径预算；即便上游耗尽，get_capital_flow_context 也会走 Cloudflare
             capital_flow_budget = min(fetch_timeout, remaining_seconds)
+            if capital_flow_budget <= 0 and os.getenv("EM_PROXY_URL", "").strip():
+                capital_flow_budget = 0.0  # 显式走代理快路径（timeout<=0 分支）
             capital_flow_start = time.time()
             result_ctx["capital_flow"] = self.get_capital_flow_context(
                 stock_code,
@@ -4670,6 +4673,10 @@ class DataFetcherManager:
             )
 
         if timeout <= 0:
+            # 上游预算耗尽时，仍用 Cloudflare 补个股资金流（快路径，不占用东财直连预算）
+            proxied_block = self._capital_flow_via_em_proxy(stock_code)
+            if proxied_block is not None:
+                return proxied_block
             return self._build_fundamental_block(
                 "failed",
                 {},
@@ -4710,42 +4717,11 @@ class DataFetcherManager:
         stock_flow = payload.get("stock_flow") or {}
         has_stock_flow = isinstance(stock_flow, dict) and any(v is not None for v in stock_flow.values())
 
-        # 关键兜底：直连/适配器超时后，Cloudflare 代理在超时隔离之外再跑一次。
-        # 否则 akshare 挂满 8s 预算时，适配器内部的 proxy 根本执行不到；后续股票还会被 quarantine 直接跳过。
-        if not has_stock_flow and os.getenv("EM_PROXY_URL", "").strip() and os.getenv("EM_PROXY_KEY", "").strip():
-            try:
-                from .akshare_fetcher import _to_sina_tx_symbol
-                from .fundamental_adapter import _fetch_stock_flow_via_proxy, _normalize_code
-
-                market = _to_sina_tx_symbol(stock_code)[:2]
-                code6 = _normalize_code(stock_code)
-                proxy_start = time.time()
-                proxied = _fetch_stock_flow_via_proxy(market, code6, attempts=3)
-                proxy_ms = int((time.time() - proxy_start) * 1000)
-                cost_ms += proxy_ms
-                if proxied:
-                    payload["stock_flow"] = proxied
-                    chain = list(payload.get("source_chain") or [])
-                    chain.append("capital_stock:em_proxy")
-                    payload["source_chain"] = chain
-                    payload["status"] = "partial"
-                    has_stock_flow = True
-                    logger.info(
-                        "[capital_flow] %s filled via em_proxy after adapter %s (adapter_ms=%s proxy_ms=%s)",
-                        stock_code,
-                        "failed" if adapter_failed else "empty",
-                        cost_ms - proxy_ms,
-                        proxy_ms,
-                    )
-                else:
-                    logger.warning(
-                        "[capital_flow] %s em_proxy also empty (adapter_failed=%s err=%s)",
-                        stock_code,
-                        adapter_failed,
-                        err,
-                    )
-            except Exception as proxy_exc:  # noqa: BLE001
-                logger.warning("[capital_flow] %s em_proxy exception: %s", stock_code, proxy_exc)
+        # 关键兜底：直连/适配器超时后，在隔离之外再走 Cloudflare（预算耗尽时上面已提前走）
+        if not has_stock_flow:
+            proxied_block = self._capital_flow_via_em_proxy(stock_code)
+            if proxied_block is not None:
+                return proxied_block
 
         stock_flow = payload.get("stock_flow") or {}
         sector_rankings = payload.get("sector_rankings") or {}
