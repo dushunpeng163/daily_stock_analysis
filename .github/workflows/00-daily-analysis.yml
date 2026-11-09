@@ -30,7 +30,9 @@ concurrency:
 
 jobs:
   analyze:
-    runs-on: ubuntu-latest
+    # 默认 GitHub 托管机；在 Settings → Variables 设 RUNNER_LABEL=self-hosted 即切到国内自建 runner
+    # （国内网络可直连东财/同花顺等免费数据源，筹码、板块、个股新闻、公告均可用）。删掉该变量即回退。
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     # 兼容误将 STOCK_LIST 配到同名 Environment variables 的场景；
     # 推荐位置仍是 Settings -> Secrets and variables -> Actions -> Repository variables。
     environment: STOCK_LIST
@@ -45,16 +47,33 @@ jobs:
         uses: actions/checkout@v5
       
       - name: 设置 Python 环境
+        if: runner.environment == 'github-hosted'
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
-      
+
+      # 自建 runner：不从 GitHub 下载 Python（国内慢），用服务器预装的 python3 建持久 venv，
+      # 后续步骤里的 python / pip 都指向该 venv。依赖按 requirements.txt 哈希缓存，变更才重装。
+      - name: 设置 Python 环境（自建 runner）
+        if: runner.environment == 'self-hosted'
+        run: |
+          VENV="$RUNNER_TOOL_CACHE/dsa-venv"
+          if [ ! -x "$VENV/bin/python" ]; then python3 -m venv "$VENV"; fi
+          echo "$VENV/bin" >> "$GITHUB_PATH"
+          echo "DSA_VENV=$VENV" >> "$GITHUB_ENV"
+          "$VENV/bin/python" --version
+
       - name: 安装依赖
         run: |
+          if [ -n "$DSA_VENV" ]; then
+            STAMP="$DSA_VENV/.req.sha256"; CUR=$(sha256sum requirements.txt | cut -d' ' -f1)
+            if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$CUR" ]; then echo "依赖未变化，跳过安装"; python -c "import futu; print('✅ futu SDK import OK')"; exit 0; fi
+          fi
           pip install --upgrade pip
           pip install -r requirements.txt
           python -c "import futu; print('✅ futu SDK import OK')"
+          if [ -n "$DSA_VENV" ]; then echo "$CUR" > "$STAMP"; fi
       
       - name: 创建必要目录
         run: |
