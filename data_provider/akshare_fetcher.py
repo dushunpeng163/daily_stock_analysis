@@ -63,8 +63,24 @@ logger = logging.getLogger(__name__)
 
 SINA_REALTIME_ENDPOINT = "hq.sinajs.cn/list"
 TENCENT_REALTIME_ENDPOINT = "qt.gtimg.cn/q"
-_AKSHARE_HISTORY_CALL_TIMEOUT = 30.0
-_AKSHARE_MARKET_STATS_CALL_TIMEOUT = 30.0
+def _env_timeout_seconds(name: str, default: float) -> float:
+    """Parse a positive timeout from env; fall back to default on bad values."""
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+# Hard cap for akshare history / market-stats calls. Override via env when
+# GitHub Actions Eastmoney hangs; on timeout the caller must fail over.
+_AKSHARE_HISTORY_CALL_TIMEOUT = _env_timeout_seconds("AKSHARE_HISTORY_CALL_TIMEOUT", 30.0)
+_AKSHARE_MARKET_STATS_CALL_TIMEOUT = _env_timeout_seconds(
+    "AKSHARE_MARKET_STATS_CALL_TIMEOUT", 30.0
+)
 _AKSHARE_TIMEOUT_PROCESS_JOIN_GRACE = 1.0
 _AKSHARE_TIMEOUT_PROCESS_START_METHOD = "spawn"
 
@@ -474,7 +490,9 @@ class AkshareFetcher(BaseFetcher):
     @retry(
         stop=stop_after_attempt(3),  # 最多重试3次
         wait=wait_exponential(multiplier=1, min=2, max=30),  # 指数退避：2, 4, 8... 最大30秒
-        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        # TimeoutError 不在此重试：单源已硬超时，应立刻换源（站内 EM→新浪→腾讯，
+        # 或 Manager 级 Akshare→Efinance→Tencent），避免 3×30s 堵死 discover。
+        retry=retry_if_exception_type((ConnectionError,)),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -618,6 +636,11 @@ class AkshareFetcher(BaseFetcher):
                 if df is not None and not df.empty:
                     logger.info(f"[数据源] {source_name} 获取成功")
                     return df
+            except TimeoutError as e:
+                last_error = e
+                logger.warning(
+                    f"[数据源] {source_name} 超时，立刻切换下一源: {e}"
+                )
             except Exception as e:
                 last_error = e
                 logger.warning(f"[数据源] {source_name} 获取失败: {e}")
@@ -630,6 +653,9 @@ class AkshareFetcher(BaseFetcher):
         """
         获取普通 A 股历史数据 (东方财富)
         数据来源：ak.stock_zh_a_hist()
+
+        必须走进程级硬超时：东财在 GitHub Actions 上偶发 TCP 挂死，
+        裸调 ak.stock_zh_a_hist 会堵死整个 discover（曾卡住 25min+）。
         """
         import akshare as ak
 
@@ -639,18 +665,24 @@ class AkshareFetcher(BaseFetcher):
         # 防封禁策略 2: 强制休眠
         self._enforce_rate_limit()
 
-        logger.info(f"[API调用] ak.stock_zh_a_hist(symbol={stock_code}, ...)")
+        logger.info(
+            f"[API调用] ak.stock_zh_a_hist(symbol={stock_code}, ..., "
+            f"timeout={self._history_call_timeout:g}s)"
+        )
 
         try:
             import time as _time
             api_start = _time.time()
 
-            df = ak.stock_zh_a_hist(
+            df = _akshare_call_with_timeout(
+                ak.stock_zh_a_hist,
                 symbol=stock_code,
                 period="daily",
                 start_date=start_date.replace('-', ''),
                 end_date=end_date.replace('-', ''),
-                adjust="qfq"
+                adjust="qfq",
+                timeout=self._history_call_timeout,
+                call_name="ak.stock_zh_a_hist",
             )
 
             api_elapsed = _time.time() - api_start
@@ -662,6 +694,8 @@ class AkshareFetcher(BaseFetcher):
                 logger.warning(f"[API返回] ak.stock_zh_a_hist 返回空数据")
                 return pd.DataFrame()
 
+        except TimeoutError:
+            raise
         except Exception as e:
             error_msg = str(e).lower()
             if any(keyword in error_msg for keyword in ['banned', 'blocked', '频率', 'rate', '限制']):
@@ -785,20 +819,26 @@ class AkshareFetcher(BaseFetcher):
         # 防封禁策略 2: 强制休眠
         self._enforce_rate_limit()
         
-        logger.info(f"[API调用] ak.fund_etf_hist_em(symbol={stock_code}, period=daily, "
-                   f"start_date={start_date.replace('-', '')}, end_date={end_date.replace('-', '')}, adjust=qfq)")
+        logger.info(
+            f"[API调用] ak.fund_etf_hist_em(symbol={stock_code}, period=daily, "
+            f"start_date={start_date.replace('-', '')}, end_date={end_date.replace('-', '')}, "
+            f"adjust=qfq, timeout={self._history_call_timeout:g}s)"
+        )
         
         try:
             import time as _time
             api_start = _time.time()
             
-            # 调用 akshare 获取 ETF 日线数据
-            df = ak.fund_etf_hist_em(
+            # 调用 akshare 获取 ETF 日线数据（硬超时，避免东财挂死）
+            df = _akshare_call_with_timeout(
+                ak.fund_etf_hist_em,
                 symbol=stock_code,
                 period="daily",
                 start_date=start_date.replace('-', ''),
                 end_date=end_date.replace('-', ''),
-                adjust="qfq"  # 前复权
+                adjust="qfq",  # 前复权
+                timeout=self._history_call_timeout,
+                call_name="ak.fund_etf_hist_em",
             )
             
             api_elapsed = _time.time() - api_start
@@ -813,7 +853,9 @@ class AkshareFetcher(BaseFetcher):
                 logger.warning(f"[API返回] ak.fund_etf_hist_em 返回空数据, 耗时 {api_elapsed:.2f}s")
             
             return df
-            
+
+        except TimeoutError:
+            raise
         except Exception as e:
             error_msg = str(e).lower()
             
@@ -944,20 +986,26 @@ class AkshareFetcher(BaseFetcher):
         # 确保代码格式正确（5位数字）
         code = stock_code.lower().replace('hk', '').zfill(5)
         
-        logger.info(f"[API调用] ak.stock_hk_hist(symbol={code}, period=daily, "
-                   f"start_date={start_date.replace('-', '')}, end_date={end_date.replace('-', '')}, adjust=qfq)")
+        logger.info(
+            f"[API调用] ak.stock_hk_hist(symbol={code}, period=daily, "
+            f"start_date={start_date.replace('-', '')}, end_date={end_date.replace('-', '')}, "
+            f"adjust=qfq, timeout={self._history_call_timeout:g}s)"
+        )
         
         try:
             import time as _time
             api_start = _time.time()
             
-            # 调用 akshare 获取港股日线数据
-            df = ak.stock_hk_hist(
+            # 调用 akshare 获取港股日线数据（硬超时，避免挂死）
+            df = _akshare_call_with_timeout(
+                ak.stock_hk_hist,
                 symbol=code,
                 period="daily",
                 start_date=start_date.replace('-', ''),
                 end_date=end_date.replace('-', ''),
-                adjust="qfq"  # 前复权
+                adjust="qfq",  # 前复权
+                timeout=self._history_call_timeout,
+                call_name="ak.stock_hk_hist",
             )
             
             api_elapsed = _time.time() - api_start
@@ -972,7 +1020,9 @@ class AkshareFetcher(BaseFetcher):
                 logger.warning(f"[API返回] ak.stock_hk_hist 返回空数据, 耗时 {api_elapsed:.2f}s")
             
             return df
-            
+
+        except TimeoutError:
+            raise
         except Exception as e:
             error_msg = str(e).lower()
             

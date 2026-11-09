@@ -138,17 +138,19 @@ def test_akshare_call_with_timeout_reaps_timed_out_worker_process() -> None:
 
 
 @pytest.mark.parametrize(
-    ("method_name", "api_name", "call_name"),
+    ("method_name", "api_name", "call_name", "expect_prefixed_symbol"),
     [
-        ("_fetch_stock_data_sina", "stock_zh_a_daily", "ak.stock_zh_a_daily"),
-        ("_fetch_stock_data_tx", "stock_zh_a_hist_tx", "ak.stock_zh_a_hist_tx"),
+        ("_fetch_stock_data_em", "stock_zh_a_hist", "ak.stock_zh_a_hist", False),
+        ("_fetch_stock_data_sina", "stock_zh_a_daily", "ak.stock_zh_a_daily", True),
+        ("_fetch_stock_data_tx", "stock_zh_a_hist_tx", "ak.stock_zh_a_hist_tx", True),
     ],
 )
-def test_sina_and_tencent_history_calls_use_timeout_wrapper(
+def test_history_calls_use_timeout_wrapper(
     monkeypatch,
     method_name: str,
     api_name: str,
     call_name: str,
+    expect_prefixed_symbol: bool,
 ) -> None:
     captured = {}
 
@@ -157,6 +159,19 @@ def test_sina_and_tencent_history_calls_use_timeout_wrapper(
         captured["timeout"] = timeout
         captured["call_name"] = call_name
         captured["kwargs"] = kwargs
+        if method_name == "_fetch_stock_data_em":
+            # EM 接口本身返回中文列名
+            return pd.DataFrame(
+                {
+                    "日期": ["2026-05-25"],
+                    "开盘": [10.0],
+                    "最高": [10.5],
+                    "最低": [9.8],
+                    "收盘": [10.2],
+                    "成交量": [1000],
+                    "成交额": [20000],
+                }
+            )
         return pd.DataFrame(
             {
                 "date": ["2026-05-25"],
@@ -176,6 +191,8 @@ def test_sina_and_tencent_history_calls_use_timeout_wrapper(
 
     fetcher = AkshareFetcher(sleep_min=0, sleep_max=0)
     fetcher._history_call_timeout = 7
+    monkeypatch.setattr(fetcher, "_set_random_user_agent", lambda: None)
+    monkeypatch.setattr(fetcher, "_enforce_rate_limit", lambda: None)
 
     method = getattr(fetcher, method_name)
     df = method("605218", "2026-05-01", "2026-05-25")
@@ -183,11 +200,40 @@ def test_sina_and_tencent_history_calls_use_timeout_wrapper(
     assert captured["func"] is fake_api_func
     assert captured["timeout"] == 7
     assert captured["call_name"] == call_name
-    assert captured["kwargs"]["symbol"] == "sh605218"
+    expected_symbol = "sh605218" if expect_prefixed_symbol else "605218"
+    assert captured["kwargs"]["symbol"] == expected_symbol
     assert captured["kwargs"]["start_date"] == "20260501"
     assert captured["kwargs"]["end_date"] == "20260525"
     assert captured["kwargs"]["adjust"] == "qfq"
-    assert list(df.columns)[:7] == ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]
+    if method_name == "_fetch_stock_data_em":
+        assert captured["kwargs"]["period"] == "daily"
+        assert list(df.columns)[:7] == ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]
+    else:
+        assert list(df.columns)[:7] == ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]
+
+
+def test_stock_data_falls_back_after_em_timeout(monkeypatch) -> None:
+    """东财硬超时后必须立刻换新浪，不能堵死整条日线链路。"""
+    fetcher = AkshareFetcher(sleep_min=0, sleep_max=0)
+    sina_df = pd.DataFrame({"日期": ["2026-05-25"], "收盘": [10.2]})
+
+    monkeypatch.setattr(
+        fetcher,
+        "_fetch_stock_data_em",
+        lambda *args: (_ for _ in ()).throw(
+            TimeoutError("ak.stock_zh_a_hist 调用超过 30s，已放弃等待")
+        ),
+    )
+    monkeypatch.setattr(fetcher, "_fetch_stock_data_sina", lambda *args: sina_df)
+    monkeypatch.setattr(
+        fetcher,
+        "_fetch_stock_data_tx",
+        lambda *args: (_ for _ in ()).throw(AssertionError("should not reach tx")),
+    )
+
+    result = fetcher._fetch_stock_data("600031", "2026-05-01", "2026-05-25")
+
+    assert result is sina_df
 
 
 def test_stock_data_falls_back_after_sina_timeout(monkeypatch) -> None:

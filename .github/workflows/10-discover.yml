@@ -65,6 +65,8 @@ jobs:
           GEMINI_REQUEST_DELAY: '3.0'
           EM_PROXY_URL: ${{ secrets.EM_PROXY_URL }}
           EM_PROXY_KEY: ${{ secrets.EM_PROXY_KEY }}
+          # 东财日K硬超时；超时后站内换新浪/腾讯，避免 Actions 挂死
+          AKSHARE_HISTORY_CALL_TIMEOUT: '25'
           ACCOUNT_SIZE: ${{ vars.ACCOUNT_SIZE || '100000' }}
           DAILY_HISTORY_DAYS: '130'
           MARKET_STATE: ${{ vars.MARKET_STATE || 'unknown' }}

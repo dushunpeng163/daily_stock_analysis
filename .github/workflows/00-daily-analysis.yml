@@ -451,6 +451,8 @@ jobs:
           REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
           EM_PROXY_URL: ${{ secrets.EM_PROXY_URL }}
           EM_PROXY_KEY: ${{ secrets.EM_PROXY_KEY }}
+          # 东财日K硬超时；超时后站内换新浪/腾讯，避免 Actions 挂死
+          AKSHARE_HISTORY_CALL_TIMEOUT: '25'
           # 策略 V2：账户规模（仓位反推）、日线历史长度（120 日结构位）、市场状态（阶段 2 接入）
           ACCOUNT_SIZE: ${{ vars.ACCOUNT_SIZE || '100000' }}
           DAILY_HISTORY_DAYS: '130'
