@@ -90,6 +90,8 @@ def classify_asset(code: str, name: str = "") -> str:
 
 def _limit_pct(code: str, name: str, asset: str) -> float:
     d = _digits(code)
+    if asset == "STOCK" and re.match(r"^\*?ST", str(name or "").strip().upper()):
+        return 0.05
     if asset == "STOCK_ETF":
         return 0.20 if any(w in str(name) for w in ("科创", "创业", "双创", "北证")) else 0.10
     if d.startswith(("30", "68")):
