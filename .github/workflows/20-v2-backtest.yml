@@ -1,0 +1,63 @@
+name: 策略 V2 现实执行回测
+
+on:
+  workflow_dispatch:
+    inputs:
+      codes:
+        description: "股票代码，逗号分隔（留空使用 BACKTEST_CODES / STOCK_LIST）"
+        required: false
+        default: ""
+      start:
+        description: "回测开始日期 YYYY-MM-DD"
+        required: true
+        default: "2023-01-01"
+      end:
+        description: "回测结束日期 YYYY-MM-DD（留空表示今天）"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BACKTEST_CODES: ${{ inputs.codes || vars.BACKTEST_CODES || vars.STOCK_LIST || secrets.STOCK_LIST }}
+      ACCOUNT_SIZE: ${{ vars.ACCOUNT_SIZE || '100000' }}
+      AKSHARE_HISTORY_CALL_TIMEOUT: '25'
+      TZ: Asia/Shanghai
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 执行 V2 回测
+        shell: bash
+        run: |
+          set -euo pipefail
+          END_ARGS=()
+          if [ -n "${{ inputs.end }}" ]; then
+            END_ARGS=(--end "${{ inputs.end }}")
+          fi
+          python scripts/backtest_v2.py \
+            --start "${{ inputs.start }}" \
+            "${END_ARGS[@]}" \
+            --output-dir reports/v2_backtest
+
+      - name: 上传回测报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-backtest-${{ github.run_number }}
+          path: reports/v2_backtest/
+          if-no-files-found: warn
+          retention-days: 30
