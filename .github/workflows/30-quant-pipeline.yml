@@ -1,0 +1,124 @@
+name: Qlib 每日量化流水线
+
+on:
+  schedule:
+    - cron: "20 10 * * 1-5" # 北京时间工作日 18:20
+  workflow_dispatch:
+    inputs:
+      force_train:
+        description: "强制重新训练并执行完整样本外验证"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qlib-daily-quant
+  cancel-in-progress: false
+
+jobs:
+  quant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ACCOUNT_SIZE: ${{ vars.ACCOUNT_SIZE || '100000' }}
+      QLIB_LIVE_ENABLED: ${{ vars.QLIB_LIVE_ENABLED || '0' }}
+      NTFY_URL: ${{ secrets.NTFY_URL }}
+      NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+      TZ: Asia/Shanghai
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-qlib.txt
+
+      - name: 获取已校验的最新 A 股数据版本
+        id: data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RELEASE=$(gh api "repos/chenditc/investment_data/releases?per_page=100" \
+            | jq -c '[.[] | select(.tag_name | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
+              | select(any(.assets[]; .name == "qlib_bin.tar.gz"))
+              | select(any(.assets[]; .name == "qlib_bin.manifest.json"))]
+              | sort_by(.tag_name) | last')
+          test "$RELEASE" != "null"
+          MANIFEST_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name=="qlib_bin.manifest.json") | .browser_download_url')
+          ARCHIVE_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name=="qlib_bin.tar.gz") | .browser_download_url')
+          curl -fsSL "$MANIFEST_URL" -o /tmp/qlib_manifest.json
+          ARCHIVE_SHA=$(jq -r '.archive_sha256 | sub("^sha256:";"")' /tmp/qlib_manifest.json)
+          TARGET_DATE=$(jq -r '.target_trade_date' /tmp/qlib_manifest.json)
+          MONTH=$(date -u +%Y-%m)
+          {
+            echo "manifest_url=$MANIFEST_URL"
+            echo "archive_url=$ARCHIVE_URL"
+            echo "archive_sha=$ARCHIVE_SHA"
+            echo "target_date=$TARGET_DATE"
+            echo "month=$MONTH"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 恢复 Qlib 行情数据
+        id: data-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.qlib/qlib_data/cn_data
+          key: qlib-cn-${{ runner.os }}-${{ steps.data.outputs.archive_sha }}
+
+      - name: 下载并验证 Qlib 行情数据
+        if: steps.data-cache.outputs.cache-hit != 'true'
+        run: |
+          python -m pip install requests==2.32.5
+          python scripts/prepare_qlib_data.py \
+            --manifest-url "${{ steps.data.outputs.manifest_url }}" \
+            --archive-url "${{ steps.data.outputs.archive_url }}" \
+            --destination "$HOME/.qlib/qlib_data/cn_data" \
+            --metadata-out data/qlib_manifest.json
+
+      - name: 校验缓存数据目录
+        run: |
+          test -d "$HOME/.qlib/qlib_data/cn_data/calendars"
+          test -d "$HOME/.qlib/qlib_data/cn_data/instruments"
+          test -d "$HOME/.qlib/qlib_data/cn_data/features"
+
+      - name: 安装锁定版 Qlib
+        run: pip install -r requirements-qlib.txt
+
+      - name: 恢复本月可信模型
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .qlib_model
+            .qlib_mlruns
+          key: qlib-model-${{ runner.os }}-${{ steps.data.outputs.month }}-${{ hashFiles('requirements-qlib.txt', 'scripts/qlib_quant_pipeline.py', 'src/quant/qlib_gate.py') }}
+
+      - name: 训练/验证/预测/推送（自动串联）
+        run: |
+          MODE=auto
+          if [ "${{ inputs.force_train || false }}" = "true" ]; then MODE=train; fi
+          python scripts/qlib_quant_pipeline.py \
+            --mode "$MODE" \
+            --data-dir "$HOME/.qlib/qlib_data/cn_data" \
+            --data-date "${{ steps.data.outputs.target_date }}" \
+            --state-dir .qlib_model \
+            --mlruns-dir .qlib_mlruns \
+            --output-dir reports/qlib \
+            --account-size "$ACCOUNT_SIZE"
+
+      - name: 上传信号与验证报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qlib-quant-${{ github.run_number }}
+          path: |
+            reports/qlib/
+            .qlib_model/state.json
+          if-no-files-found: warn
+          retention-days: 30

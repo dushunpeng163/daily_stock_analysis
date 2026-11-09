@@ -1,0 +1,6 @@
+# Qlib v0.9.8 is not yet published on PyPI; pin the verified release commit.
+git+https://github.com/microsoft/qlib.git@54355232463878d2eebb91fe0ee5fa7fa1f5976c
+lightgbm==4.6.0
+numpy==1.26.4
+pandas==2.2.3
+requests==2.32.5
