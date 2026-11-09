@@ -148,7 +148,8 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
 
     dataset = _dataset(args.data_date)
     model = _model()
-    with R.start(experiment_name=EXPERIMENT, recorder_name=f"fixed-split-{args.data_date}") as recorder:
+    with R.start(experiment_name=EXPERIMENT, recorder_name=f"fixed-split-{args.data_date}"):
+        recorder = R.get_recorder()
         model.fit(dataset)
         R.save_objects(**{"params.pkl": model})
         dataset.config(dump_all=False, recursive=True)
