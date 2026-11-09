@@ -111,44 +111,72 @@ def _account_size(explicit: Optional[float]) -> float:
     return v if v > 0 else 100000.0
 
 
-def _auto_detect_market_state() -> str:
-    """用沪深300(sh000300)与创业板指(sz399006)相对 MA20 自动判大盘强弱（单进程缓存一次）。"""
-    global _AUTO_MARKET_CACHE
-    if _AUTO_MARKET_CACHE is not None:
-        return _AUTO_MARKET_CACHE
-    try:
-        from data_provider import DataFetcherManager
+_AUTO_MARKET_UNKNOWN_TRIES = 0
+_AUTO_MARKET_MAX_TRIES = 3
 
-        mgr = DataFetcherManager()
-        up, total = 0, 0
-        for idx_code in ("sh000300", "sz399006"):
-            try:
-                df, _ = mgr.get_daily_data(idx_code, days=35)
-                if df is None or df.empty or len(df) < 20 or "close" not in df.columns:
-                    continue
+
+def _index_above_ma20(mgr: Any, idx_code: str) -> Optional[bool]:
+    """返回该指数是否「收盘在 MA20 上方且 MA20 未走弱」；取不到数据返回 None。每个指数最多尝试 2 次。"""
+    import time
+
+    last_err: Optional[str] = None
+    for attempt in range(2):
+        try:
+            df, _ = mgr.get_daily_data(idx_code, days=35)
+            if df is None or df.empty or "close" not in df.columns:
+                last_err = "空数据"
+            elif len(df) < 20:
+                last_err = f"仅 {len(df)} 根 K 线，不足 20"
+            else:
                 close = df["close"].astype(float).reset_index(drop=True)
                 c_now = float(close.iloc[-1])
                 ma20 = float(close.iloc[-20:].mean())
                 ma20_prev = float(close.iloc[-25:-5].mean()) if len(close) >= 25 else ma20
-                if c_now <= 0 or ma20 <= 0:
-                    continue
-                total += 1
-                if c_now > ma20 and ma20 >= ma20_prev * 0.998:
-                    up += 1
-            except Exception:  # noqa: BLE001
-                continue
-        if total == 0:
-            _AUTO_MARKET_CACHE = "unknown"
-        elif up == total and total >= 2:
-            _AUTO_MARKET_CACHE = "strong"
-        elif up == 0:
-            _AUTO_MARKET_CACHE = "weak"
-        else:
-            _AUTO_MARKET_CACHE = "neutral"
-    except Exception:  # noqa: BLE001
-        _AUTO_MARKET_CACHE = "unknown"
-    logger.info("[risk_levels] 自动判定市场状态: %s", _AUTO_MARKET_CACHE)
-    return _AUTO_MARKET_CACHE
+                if c_now > 0 and ma20 > 0:
+                    return bool(c_now > ma20 and ma20 >= ma20_prev * 0.998)
+                last_err = "价格异常"
+        except Exception as exc:  # noqa: BLE001
+            last_err = f"{type(exc).__name__}: {exc}"
+        if attempt == 0:
+            time.sleep(1.5)
+    logger.warning("[risk_levels] 市场状态判定：%s 数据获取失败（%s）", idx_code, last_err)
+    return None
+
+
+def _auto_detect_market_state() -> str:
+    """用沪深300(sh000300)与创业板指(sz399006)相对 MA20 自动判大盘强弱。
+
+    - 判出 strong/neutral/weak 后进程内缓存；
+    - 判为 unknown（两个指数都取不到）时不缓存，后续标的会再试，最多 3 次，避免一次网络抖动
+      让整批标的都按「未接入」处理。
+    """
+    global _AUTO_MARKET_CACHE, _AUTO_MARKET_UNKNOWN_TRIES
+    if _AUTO_MARKET_CACHE is not None:
+        return _AUTO_MARKET_CACHE
+    if _AUTO_MARKET_UNKNOWN_TRIES >= _AUTO_MARKET_MAX_TRIES:
+        return "unknown"
+    _AUTO_MARKET_UNKNOWN_TRIES += 1
+    result = "unknown"
+    try:
+        from data_provider import DataFetcherManager
+
+        mgr = DataFetcherManager()
+        flags = [f for f in (_index_above_ma20(mgr, c) for c in ("sh000300", "sz399006")) if f is not None]
+        if len(flags) == 2:
+            result = "strong" if all(flags) else "weak" if not any(flags) else "neutral"
+        elif len(flags) == 1:
+            # 只有一个指数可用：不给 strong（避免单指数误判放大仓位），上方记 neutral，下方记 weak
+            result = "neutral" if flags[0] else "weak"
+            logger.warning("[risk_levels] 市场状态仅依据单一指数判定为 %s", result)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[risk_levels] 市场状态判定异常: %s", exc)
+    if result != "unknown":
+        _AUTO_MARKET_CACHE = result
+        logger.info("[risk_levels] 自动判定市场状态: %s", result)
+    else:
+        logger.warning("[risk_levels] 自动判定市场状态失败（第 %d/%d 次），本标的按未接入处理",
+                       _AUTO_MARKET_UNKNOWN_TRIES, _AUTO_MARKET_MAX_TRIES)
+    return result
 
 
 def _market_state(explicit: Optional[str]) -> str:

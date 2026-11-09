@@ -741,6 +741,18 @@ class StockAnalysisPipeline:
                         logger.warning(f"{stock_name}({code}) 保存新闻情报失败: {e}")
             else:
                 logger.info(f"{stock_name}({code}) 搜索服务不可用，跳过情报搜索")
+                # 免费兜底：东财个股新闻 + 巨潮公告（A 股个股/ETF；国内网络下可用）
+                try:
+                    from src.services.free_intel import build_free_intel_context
+
+                    free_intel = build_free_intel_context(code, stock_name, is_index=is_index)
+                except Exception as e:  # noqa: BLE001
+                    free_intel = None
+                    logger.warning(f"{stock_name}({code}) 免费情报兜底失败: {e}")
+                if free_intel:
+                    news_context = free_intel["context"]
+                    news_result_count = free_intel["count"]
+                    logger.info(f"{stock_name}({code}) 免费情报兜底命中 {free_intel['count']} 条（新闻+公告）")
 
             # Step 4.5: Social sentiment intelligence (US stocks only)
             social_evidence_context: Optional[str] = None
