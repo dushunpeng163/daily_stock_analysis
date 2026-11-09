@@ -7,7 +7,7 @@ import tarfile
 import pandas as pd
 
 from scripts.prepare_qlib_data import _find_cn_data, _safe_extract, _sha256
-from scripts.qlib_quant_pipeline import _publish, _top3
+from scripts.qlib_quant_pipeline import _merge_portfolio_metrics, _publish, _top3
 from src.quant.qlib_gate import evaluate_qlib_gate
 
 
@@ -62,6 +62,21 @@ def test_top3_uses_latest_prediction_date() -> None:
     signal_date, rows = _top3(pred)
     assert signal_date == "2026-11-06"
     assert [row["instrument"] for row in rows] == ["SZ000001", "SZ000003", "SH600001"]
+
+
+def test_portfolio_metrics_are_read_from_analysis_artifact() -> None:
+    index = pd.MultiIndex.from_tuples(
+        [
+            ("excess_return_with_cost", "annualized_return"),
+            ("excess_return_with_cost", "information_ratio"),
+            ("excess_return_with_cost", "max_drawdown"),
+        ]
+    )
+    analysis = pd.DataFrame({"risk": [0.13, 0.75, -0.29]}, index=index)
+    metrics = _merge_portfolio_metrics({"Rank IC": 0.04}, analysis)
+    assert metrics["1day.excess_return_with_cost.annualized_return"] == 0.13
+    assert metrics["1day.excess_return_with_cost.information_ratio"] == 0.75
+    assert metrics["1day.excess_return_with_cost.max_drawdown"] == -0.29
 
 
 def test_publish_never_marks_live_when_gate_failed(tmp_path: Path, monkeypatch) -> None:

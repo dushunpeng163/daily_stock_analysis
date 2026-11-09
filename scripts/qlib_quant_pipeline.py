@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import date, datetime
+from email.header import Header
 import json
 import os
 from pathlib import Path
@@ -142,6 +143,17 @@ def _top3(pred: pd.DataFrame) -> tuple[str, list[Dict[str, Any]]]:
     return latest.date().isoformat(), rows
 
 
+def _merge_portfolio_metrics(metrics: Dict[str, Any], analysis: pd.DataFrame) -> Dict[str, Any]:
+    """从已落盘的风险分析中读取关键指标，避免 MLflow 异步日志尚未刷新。"""
+    result = dict(metrics)
+    risk = analysis["risk"]
+    for name in ("annualized_return", "information_ratio", "max_drawdown"):
+        result[f"1day.excess_return_with_cost.{name}"] = float(
+            risk.loc[("excess_return_with_cost", name)]
+        )
+    return result
+
+
 def train(args: argparse.Namespace) -> Dict[str, Any]:
     from qlib.workflow import R
     from qlib.workflow.record_temp import PortAnaRecord, SigAnaRecord, SignalRecord
@@ -163,6 +175,8 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             indicator_analysis_freq="day",
         ).generate()
         metrics = dict(recorder.list_metrics())
+        analysis = recorder.load_object("portfolio_analysis/port_analysis_1day.pkl")
+        metrics = _merge_portfolio_metrics(metrics, analysis)
         report = recorder.load_object("portfolio_analysis/report_normal_1day.pkl")
         trading_days = int((report["turnover"].abs() > 0).sum()) if "turnover" in report else 0
         gate = evaluate_qlib_gate(metrics, test_days=len(report), trading_days=trading_days)
@@ -256,7 +270,7 @@ def _publish(state: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
             ntfy_url,
             data=message.encode("utf-8"),
             headers={
-                "Title": "Qlib Top3 模型信号",
+                "Title": Header("Qlib Top3 模型信号", "utf-8").encode(),
                 "Tags": "robot,chart_with_upwards_trend",
                 **({"Authorization": f"Bearer {os.getenv('NTFY_TOKEN')}"} if os.getenv("NTFY_TOKEN") else {}),
             },
