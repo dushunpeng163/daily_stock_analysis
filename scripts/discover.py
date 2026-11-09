@@ -490,14 +490,14 @@ def main() -> int:
 
     with cf.ThreadPoolExecutor(max_workers=3) as ex:
         list(ex.map(_plan, pre))
-    # 能出手/可观察的优先；skip（趋势不满足、止损异常、盈亏比不足）先剔除，好标的太少时才补位
+    # 严禁拿 skip（趋势不满足、止损异常、盈亏比不足）凑数：宁可少推，不推垃圾单
     good = [v for v in pre if plan_state(v["plan"]) in ("ok", "wait", "watch", "weak")]
     rest = [v for v in pre if v not in good]
     key = lambda v: (VERDICT_ORDER.get(plan_state(v["plan"]), 6), -len(v["hits"]), -v["pick"].final_score)
     good.sort(key=key)
     rest.sort(key=key)
-    log.info("可入场/观察 %d 只，空头/不出手 %d 只", len(good), len(rest))
-    pre = good + (rest[: max(0, 8 - len(good))] if len(good) < 8 else [])
+    log.info("可入场/观察 %d 只，空头/不出手 %d 只（已剔除，不补位）", len(good), len(rest))
+    pre = good if good else rest[:3]
     # 行业分散：同一行业（金融类合并）最多 2 只
     per_sector, final = Counter(), []
     for it in pre:
@@ -533,7 +533,8 @@ def main() -> int:
         if len(kept) >= 3:
             final = kept
         av = {"跟踪": 0, "观望": 1, "": 2}
-        final.sort(key=lambda v: (av.get((v.get("ai") or {}).get("verdict", ""), 2), VERDICT_ORDER.get(plan_state(v["plan"]), 6),
+        # 量化可执行状态（ok > wait > watch）优先于 AI 主观标签，避免 AI「跟踪」把 watch 排到 ok 前面
+        final.sort(key=lambda v: (VERDICT_ORDER.get(plan_state(v["plan"]), 6), av.get((v.get("ai") or {}).get("verdict", ""), 2),
                                   -v.get("fund_q", 0), -len(v["hits"]), -v["pick"].final_score))
     final = final[:max_cards]
     deep = deep_analyze(final) if os.getenv("SCREEN_DEEP", "1") != "0" else {}
