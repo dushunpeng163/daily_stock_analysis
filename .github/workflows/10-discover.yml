@@ -22,20 +22,35 @@ concurrency:
 
 jobs:
   discover:
-    runs-on: ubuntu-latest
+    # 与 00-daily-analysis 一致：设了 vars.RUNNER_LABEL=self-hosted 即在国内自建 runner 上跑（全市场扫描最依赖国内数据源）
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v6
+        if: runner.environment == 'github-hosted'
         with:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: 设置 Python 环境（自建 runner）
+        if: runner.environment == 'self-hosted'
+        run: |
+          VENV="$RUNNER_TOOL_CACHE/dsa-venv"
+          if [ ! -x "$VENV/bin/python" ]; then python3 -m venv "$VENV"; fi
+          echo "$VENV/bin" >> "$GITHUB_PATH"
+          echo "DSA_VENV=$VENV" >> "$GITHUB_ENV"
+
       - name: 安装依赖
         run: |
+          if [ -n "$DSA_VENV" ]; then
+            STAMP="$DSA_VENV/.req.sha256"; CUR=$(sha256sum requirements.txt | cut -d' ' -f1)
+            if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$CUR" ]; then echo "依赖未变化，跳过安装"; exit 0; fi
+          fi
           pip install --upgrade pip
           pip install -r requirements.txt
+          if [ -n "$DSA_VENV" ]; then echo "$CUR" > "$STAMP"; fi
 
       - name: 运行选股发现
         env:
@@ -58,11 +73,18 @@ jobs:
           BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
           LOG_LEVEL: INFO
           STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST }}
+          # LLM：与 00-daily-analysis 同源。设了 LITELLM_MODEL（如 deepseek/deepseek-v4-flash）则优先，否则按 key 自动推断
+          LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
+          LITELLM_FALLBACK_MODELS: ${{ vars.LITELLM_FALLBACK_MODELS || secrets.LITELLM_FALLBACK_MODELS }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_API_KEYS: ${{ secrets.DEEPSEEK_API_KEYS }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
           GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || 'gemini-3.6-flash' }}
           GEMINI_REQUEST_DELAY: '3.0'
+          # 搜索服务未配置时，国内 runner 可用东财新闻+巨潮公告免费兜底
+          FREE_INTEL_FALLBACK: ${{ vars.FREE_INTEL_FALLBACK || 'true' }}
           EM_PROXY_URL: ${{ secrets.EM_PROXY_URL }}
           EM_PROXY_KEY: ${{ secrets.EM_PROXY_KEY }}
           # 东财日K硬超时；超时后站内换新浪/腾讯，避免 Actions 挂死
