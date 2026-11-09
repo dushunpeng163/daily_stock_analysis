@@ -69,7 +69,7 @@ def _fetch(manager, code: str, start: date, end: date):
 def _render_markdown(payload: Dict) -> str:
     s = payload["summary"]
     lines = [
-        "# 策略 V2 现实执行回测",
+        f"# 策略 {payload.get('strategy_version', 'v2').upper()} 现实执行回测",
         "",
         f"- 区间：{payload['period']['start']} ～ {payload['period']['end']}",
         f"- 标的：{', '.join(payload['codes'])}",
@@ -121,6 +121,7 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("BACKTEST_CODES") or os.getenv("STOCK_LIST") or "",
         help="逗号分隔代码；可用 600519|贵州茅台 携带名称",
     )
+    parser.add_argument("--strategy-version", choices=("v2", "v3"), default="v2")
     parser.add_argument("--start", required=True, help="信号开始日期 YYYY-MM-DD")
     parser.add_argument("--end", default=date.today().isoformat(), help="信号结束日期 YYYY-MM-DD")
     parser.add_argument("--account-size", type=float, default=float(os.getenv("ACCOUNT_SIZE") or 100000))
@@ -160,6 +161,11 @@ def main() -> int:
     # 130 根预热需要约 200 个自然日；多取 260 天覆盖节假日和停牌。
     fetch_start = start - timedelta(days=260)
     manager = DataFetcherManager()
+    plan_provider = None
+    if args.strategy_version == "v3":
+        from src.core.v3_strategy import make_v3_plan_provider
+
+        plan_provider = make_v3_plan_provider(cfg.account_size)
     benchmark_frames = []
     for index_code in ("sh000300", "sz399006"):
         try:
@@ -181,6 +187,7 @@ def main() -> int:
                     start_date=start,
                     end_date=end,
                     config=cfg,
+                    plan_provider=plan_provider,
                     market_state_provider=market_provider,
                 )
             )
@@ -213,6 +220,7 @@ def main() -> int:
     summary["trades_per_year"] = round(summary["trade_count"] / (period_days / 365.0), 2)
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "strategy_version": args.strategy_version,
         "period": {"start": start.isoformat(), "end": end.isoformat()},
         "codes": [code for code, _ in codes],
         "config": cfg.__dict__,
@@ -223,7 +231,7 @@ def main() -> int:
     }
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"v2_backtest_{start.isoformat()}_{end.isoformat()}"
+    stem = f"{args.strategy_version}_backtest_{start.isoformat()}_{end.isoformat()}"
     json_path = output_dir / f"{stem}.json"
     md_path = output_dir / f"{stem}.md"
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
