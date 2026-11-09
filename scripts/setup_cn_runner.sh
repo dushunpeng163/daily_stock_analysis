@@ -34,7 +34,9 @@ echo "==> 配置 pip 国内镜像（全局）"
 mkdir -p /etc/pip
 cat > /etc/pip.conf <<'EOF'
 [global]
-index-url = https://pypi.tuna.tsinghua.edu.cn/simple
+# 阿里云 ECS 上走阿里镜像最快（同机房）；其他云商可换成清华 https://pypi.tuna.tsinghua.edu.cn/simple
+index-url = https://mirrors.aliyun.com/pypi/simple/
+extra-index-url = https://pypi.tuna.tsinghua.edu.cn/simple
 timeout = 60
 EOF
 
