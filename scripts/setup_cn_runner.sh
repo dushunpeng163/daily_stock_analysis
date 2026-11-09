@@ -55,7 +55,9 @@ ORIGIN_URL="https://github.com/actions/runner/releases/download/v${VER}/${TARBAL
 # 下载源：GitHub 直连 → 国内加速镜像（可用 GH_PROXY=https://xxx/ 自定义，镜像用法为 前缀+原始 URL）
 MIRRORS=("" "${GH_PROXY:-}" "https://ghfast.top/" "https://ghproxy.net/" "https://gh-proxy.com/" "https://mirror.ghproxy.com/")
 cd "$RUNNER_HOME"
-if [ ! -f ".runner" ]; then
+if [ -x "./config.sh" ]; then
+  echo "    runner 程序已存在，跳过下载"
+else
   ok=0
   if [ -f "$TARBALL" ] && tar tzf "$TARBALL" >/dev/null 2>&1; then echo "    已存在 $TARBALL，跳过下载"; ok=1; chown "$RUNNER_USER:$RUNNER_USER" "$TARBALL"; fi
   [ "$ok" -eq 1 ] && MIRRORS=()
@@ -63,7 +65,7 @@ if [ ! -f ".runner" ]; then
     [ -z "$m" ] && [ "${#MIRRORS[@]}" -gt 1 ] && [ -n "${GH_PROXY:-}" ] && continue   # 指定了 GH_PROXY 就不再试直连
     url="${m}${ORIGIN_URL}"
     echo "    尝试: $url"
-    if sudo -u "$RUNNER_USER" curl -fL -m 600 --connect-timeout 15 --retry 2 --retry-delay 3 -o "$TARBALL" "$url" \
+    if sudo -u "$RUNNER_USER" curl -fL -C - -m 7200 --connect-timeout 15 --retry 2 --retry-delay 3 -o "$TARBALL" "$url" \
        && sudo -u "$RUNNER_USER" tar tzf "$TARBALL" >/dev/null 2>&1; then ok=1; break; fi
     rm -f "$TARBALL"
   done
@@ -73,6 +75,10 @@ if [ ! -f ".runner" ]; then
   fi
   sudo -u "$RUNNER_USER" tar xzf "$TARBALL" && rm -f "$TARBALL"
   ./bin/installdependencies.sh >/dev/null
+fi
+chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_HOME"
+
+if [ ! -f ".runner" ]; then
   echo "==> 注册 runner（label: self-hosted,cn）"
   sudo -u "$RUNNER_USER" ./config.sh --unattended \
     --url "https://github.com/${REPO}" --token "$TOKEN" \
