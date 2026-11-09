@@ -144,6 +144,7 @@ class TrendAnalysisResult:
     breakout_level: float = 0.0      # 近 5 日内放量突破时的前 20 日高点（0 = 无）
     breakout_age: Optional[int] = None  # 距突破日的交易日数（0 = 当日）
     breakout_high: float = 0.0       # 突破日至今的最高价（突破后的目标必须在此之上）
+    breakout_low: float = 0.0        # 突破日至今的最低价（用于突破回踩止损锚点）
     last_open: float = 0.0
     last_high: float = 0.0
     last_low: float = 0.0
@@ -519,6 +520,7 @@ class StockTrendAnalyzer:
                         result.breakout_level = lvl
                         result.breakout_age = k
                         result.breakout_high = float(high.iloc[i:].max())
+                        result.breakout_low = float(low.iloc[i:].min())
                         break
         except Exception as e:  # noqa: BLE001
             logger.warning(f"{result.code} ATR 计算失败: {e}")
