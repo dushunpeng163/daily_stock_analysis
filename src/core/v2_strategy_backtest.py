@@ -387,9 +387,44 @@ def infer_historical_market_state(
     return provider
 
 
-def summarise_v2_backtest(results: Iterable[Dict[str, Any]], account_size: float) -> Dict[str, Any]:
-    trades = [trade for result in results for trade in result.get("trades", [])]
-    trades.sort(key=lambda t: (str(t["exit_date"]), str(t["entry_date"]), t["code"]))
+def _as_date(value: Any) -> date:
+    if isinstance(value, date):
+        return value
+    return pd.to_datetime(value).date()
+
+
+def select_v2_portfolio_trades(
+    results: Iterable[Dict[str, Any]],
+    max_positions: int = 3,
+) -> tuple[List[Dict[str, Any]], int]:
+    """按入场时间执行最多 N 个并发仓位；同日退出的仓位仍占用当日名额（保守）。"""
+    if max_positions <= 0:
+        raise ValueError("max_positions must be positive")
+    candidates = [trade for result in results for trade in result.get("trades", [])]
+    candidates.sort(key=lambda t: (_as_date(t["entry_date"]), str(t["code"]), _as_date(t["exit_date"])))
+    accepted: List[Dict[str, Any]] = []
+    active_exits: List[date] = []
+    rejected = 0
+    for trade in candidates:
+        entry_date = _as_date(trade["entry_date"])
+        active_exits = [exit_date for exit_date in active_exits if exit_date >= entry_date]
+        if len(active_exits) >= max_positions:
+            rejected += 1
+            continue
+        accepted.append(trade)
+        active_exits.append(_as_date(trade["exit_date"]))
+    accepted.sort(key=lambda t: (_as_date(t["exit_date"]), _as_date(t["entry_date"]), str(t["code"])))
+    return accepted, rejected
+
+
+def summarise_v2_backtest(
+    results: Iterable[Dict[str, Any]],
+    account_size: float,
+    max_positions: int = 3,
+) -> Dict[str, Any]:
+    results_list = list(results)
+    trades, rejected = select_v2_portfolio_trades(results_list, max_positions=max_positions)
+    candidate_count = sum(len(result.get("trades", [])) for result in results_list)
     pnls = [float(t["net_pnl"]) for t in trades]
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p < 0]
@@ -411,6 +446,9 @@ def summarise_v2_backtest(results: Iterable[Dict[str, Any]], account_size: float
     gross_loss = abs(sum(losses))
     total = len(trades)
     return {
+        "candidate_trade_count": candidate_count,
+        "rejected_by_max_positions": rejected,
+        "max_positions": max_positions,
         "trade_count": total,
         "win_count": len(wins),
         "loss_count": len(losses),
