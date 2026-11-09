@@ -1,0 +1,74 @@
+name: 策略 V3 样本外验证
+
+on:
+  workflow_dispatch:
+    inputs:
+      codes:
+        description: "股票代码，逗号分隔（留空使用 BACKTEST_CODES / STOCK_LIST）"
+        required: false
+        default: ""
+      train_start:
+        description: "训练期开始"
+        required: true
+        default: "2023-01-01"
+      train_end:
+        description: "训练期结束"
+        required: true
+        default: "2024-12-31"
+      test_start:
+        description: "样本外开始"
+        required: true
+        default: "2025-01-01"
+      test_end:
+        description: "样本外结束"
+        required: true
+        default: "2026-11-06"
+
+permissions:
+  contents: read
+
+jobs:
+  walk-forward:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BACKTEST_CODES: ${{ inputs.codes || vars.BACKTEST_CODES || vars.STOCK_LIST || secrets.STOCK_LIST }}
+      ACCOUNT_SIZE: ${{ vars.ACCOUNT_SIZE || '100000' }}
+      AKSHARE_HISTORY_CALL_TIMEOUT: '25'
+      TZ: Asia/Shanghai
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 训练期回测（仅用于设计评估）
+        run: |
+          python scripts/backtest_v2.py \
+            --strategy-version v3 \
+            --start "${{ inputs.train_start }}" \
+            --end "${{ inputs.train_end }}" \
+            --output-dir reports/v3/train
+
+      - name: 样本外回测（不得据此调参）
+        run: |
+          python scripts/backtest_v2.py \
+            --strategy-version v3 \
+            --start "${{ inputs.test_start }}" \
+            --end "${{ inputs.test_end }}" \
+            --output-dir reports/v3/test
+
+      - name: 上传 V3 走查报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v3-walkforward-${{ github.run_number }}
+          path: reports/v3/
+          if-no-files-found: warn
+          retention-days: 30
