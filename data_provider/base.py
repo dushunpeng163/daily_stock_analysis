@@ -4656,6 +4656,33 @@ class DataFetcherManager:
                     payload["errors"].append(f"{fetcher.name}: {sup_err}")
                 logger.warning("[资金流] %s 获取 %s 失败: %s", fetcher.name, stock_code, sup_err)
 
+    def _capital_flow_via_em_proxy(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """预算外/直连失败时，用 Cloudflare 代理补个股资金流。成功返回 fundamental block，否则 None。"""
+        if not os.getenv("EM_PROXY_URL", "").strip() or not os.getenv("EM_PROXY_KEY", "").strip():
+            return None
+        try:
+            from .akshare_fetcher import _to_sina_tx_symbol
+            from .fundamental_adapter import _fetch_stock_flow_via_proxy, _normalize_code
+
+            market = _to_sina_tx_symbol(stock_code)[:2]
+            code6 = _normalize_code(stock_code)
+            t0 = time.time()
+            proxied = _fetch_stock_flow_via_proxy(market, code6, attempts=3)
+            cost_ms = int((time.time() - t0) * 1000)
+            if not proxied:
+                logger.warning("[capital_flow] %s em_proxy empty (cost_ms=%s)", stock_code, cost_ms)
+                return None
+            logger.info("[capital_flow] %s filled via em_proxy (cost_ms=%s) %s", stock_code, cost_ms, proxied)
+            return self._build_fundamental_block(
+                "ok",
+                {"stock_flow": proxied, "sector_rankings": {"top": [], "bottom": []}},
+                self._normalize_source_chain(["capital_stock:em_proxy"], "capital_flow", "ok", cost_ms),
+                [],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[capital_flow] %s em_proxy exception: %s", stock_code, exc)
+            return None
+
     def get_capital_flow_context(self, stock_code: str, budget_seconds: Optional[float] = None) -> Dict[str, Any]:
         """资金流向块（fail-open）。"""
         from src.config import get_config
