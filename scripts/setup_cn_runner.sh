@@ -44,11 +44,33 @@ mkdir -p "$RUNNER_HOME"; chown "$RUNNER_USER:$RUNNER_USER" "$RUNNER_HOME"
 
 echo "==> 下载 actions-runner"
 ARCH=$(uname -m); case "$ARCH" in x86_64) RARCH=x64;; aarch64) RARCH=arm64;; *) echo "不支持的架构 $ARCH" >&2; exit 1;; esac
-VER=$(curl -fsSL --retry 5 https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name | sed 's/^v//')
+# 版本号：先问 GitHub API（10 秒超时），不通就用内置的已知版本；也可用 RUNNER_VERSION=2.xxx.x 指定
+VER="${RUNNER_VERSION:-}"
+if [ -z "$VER" ]; then
+  VER=$(curl -fsSL -m 10 https://api.github.com/repos/actions/runner/releases/latest 2>/dev/null | jq -r .tag_name 2>/dev/null | sed 's/^v//') || true
+fi
+if [ -z "$VER" ] || [ "$VER" = "null" ]; then VER="2.338.2"; echo "    GitHub API 不通，使用内置版本 $VER"; fi
 TARBALL="actions-runner-linux-${RARCH}-${VER}.tar.gz"
+ORIGIN_URL="https://github.com/actions/runner/releases/download/v${VER}/${TARBALL}"
+# 下载源：GitHub 直连 → 国内加速镜像（可用 GH_PROXY=https://xxx/ 自定义，镜像用法为 前缀+原始 URL）
+MIRRORS=("" "${GH_PROXY:-}" "https://ghfast.top/" "https://ghproxy.net/" "https://gh-proxy.com/" "https://mirror.ghproxy.com/")
 cd "$RUNNER_HOME"
 if [ ! -f ".runner" ]; then
-  sudo -u "$RUNNER_USER" curl -fL --retry 5 --retry-delay 5 -o "$TARBALL" "https://github.com/actions/runner/releases/download/v${VER}/${TARBALL}"
+  ok=0
+  if [ -f "$TARBALL" ] && tar tzf "$TARBALL" >/dev/null 2>&1; then echo "    已存在 $TARBALL，跳过下载"; ok=1; chown "$RUNNER_USER:$RUNNER_USER" "$TARBALL"; fi
+  [ "$ok" -eq 1 ] && MIRRORS=()
+  for m in "${MIRRORS[@]}"; do
+    [ -z "$m" ] && [ "${#MIRRORS[@]}" -gt 1 ] && [ -n "${GH_PROXY:-}" ] && continue   # 指定了 GH_PROXY 就不再试直连
+    url="${m}${ORIGIN_URL}"
+    echo "    尝试: $url"
+    if sudo -u "$RUNNER_USER" curl -fL -m 600 --connect-timeout 15 --retry 2 --retry-delay 3 -o "$TARBALL" "$url" \
+       && sudo -u "$RUNNER_USER" tar tzf "$TARBALL" >/dev/null 2>&1; then ok=1; break; fi
+    rm -f "$TARBALL"
+  done
+  if [ "$ok" -ne 1 ]; then
+    echo "下载 actions-runner 失败：GitHub 及所有镜像都不可达。可在本机下载 $ORIGIN_URL 后上传到 $RUNNER_HOME/$TARBALL 再重跑本脚本。" >&2
+    exit 1
+  fi
   sudo -u "$RUNNER_USER" tar xzf "$TARBALL" && rm -f "$TARBALL"
   ./bin/installdependencies.sh >/dev/null
   echo "==> 注册 runner（label: self-hosted,cn）"
