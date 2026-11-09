@@ -9,8 +9,8 @@
   - 仓位按账户风险反推（ACCOUNT_SIZE 环境变量），并给出极端风险。
 
 状态（state）
-  ok      入场条件已触发，现价盈亏比 ≥ 1.8 且未超出计划入场价 0.5×ATR
-  wait    计划盈亏比 ≥ 2，但现价追入盈亏比 < 1.8（或价格在入场区上方，等回踩）
+  ok      入场条件已触发，计划盈亏比 ≥ 2.0 且现价盈亏比 ≥ 2.0，且未超出计划入场价 0.5×ATR
+  wait    计划盈亏比 ≥ 2.0，但现价盈亏比 < 2.0（或价格在入场区上方，等回踩）
   watch   条件基本满足，尚未进入入场区 / 尚未确认止跌
   expired 确认后价格已超出计划入场价 1×ATR，不再追入
   skip    趋势不满足 / 止损距离异常 / 盈亏比 < 1.5 / 仓位不足 100 股
@@ -28,15 +28,17 @@ logger = logging.getLogger(__name__)
 
 STOP_ATR_MULT_PULLBACK = 1.5
 STOP_LOW_BUFFER_ATR = 0.3
-STOP_ATR_MULT_BREAKOUT = 1.0
+STOP_ATR_MULT_BREAKOUT = 1.25
 ZONE_ATR = 0.25
 TARGET_MIN_GAP_ATR = 0.5
 RR_MIN_PLAN = 1.5
 RR_WAIT_PLAN = 2.0
-RR_OK_NOW = 1.8
+RR_OK_NOW = 2.0
 STOP_RANGE = {"STOCK": (0.02, 0.08), "STOCK_ETF": (0.01, 0.05)}
 RISK_PCT_BY_MARKET = {"strong": 0.75, "neutral": 0.35, "weak": 0.0, "unknown": 0.35}
 MAX_POSITION_PCT = 0.10
+
+_AUTO_MARKET_CACHE: Optional[str] = None
 
 STATE_ICON = {"ok": "✅", "wait": "⏳", "watch": "👀", "expired": "⌛", "skip": "❌", "na": "➖"}
 STATE_LABEL = {"ok": "可以出手", "wait": "等待出手", "watch": "观察", "expired": "已失效", "skip": "不出手", "na": "不适用"}
@@ -107,9 +109,51 @@ def _account_size(explicit: Optional[float]) -> float:
     return v if v > 0 else 100000.0
 
 
+def _auto_detect_market_state() -> str:
+    """用沪深300(sh000300)与创业板指(sz399006)相对 MA20 自动判大盘强弱（单进程缓存一次）。"""
+    global _AUTO_MARKET_CACHE
+    if _AUTO_MARKET_CACHE is not None:
+        return _AUTO_MARKET_CACHE
+    try:
+        from data_provider import DataFetcherManager
+
+        mgr = DataFetcherManager()
+        up, total = 0, 0
+        for idx_code in ("sh000300", "sz399006"):
+            try:
+                df, _ = mgr.get_daily_data(idx_code, days=35)
+                if df is None or df.empty or len(df) < 20 or "close" not in df.columns:
+                    continue
+                close = df["close"].astype(float).reset_index(drop=True)
+                c_now = float(close.iloc[-1])
+                ma20 = float(close.iloc[-20:].mean())
+                ma20_prev = float(close.iloc[-25:-5].mean()) if len(close) >= 25 else ma20
+                if c_now <= 0 or ma20 <= 0:
+                    continue
+                total += 1
+                if c_now > ma20 and ma20 >= ma20_prev * 0.998:
+                    up += 1
+            except Exception:  # noqa: BLE001
+                continue
+        if total == 0:
+            _AUTO_MARKET_CACHE = "unknown"
+        elif up == total and total >= 2:
+            _AUTO_MARKET_CACHE = "strong"
+        elif up == 0:
+            _AUTO_MARKET_CACHE = "weak"
+        else:
+            _AUTO_MARKET_CACHE = "neutral"
+    except Exception:  # noqa: BLE001
+        _AUTO_MARKET_CACHE = "unknown"
+    logger.info("[risk_levels] 自动判定市场状态: %s", _AUTO_MARKET_CACHE)
+    return _AUTO_MARKET_CACHE
+
+
 def _market_state(explicit: Optional[str]) -> str:
     s = (explicit or os.getenv("MARKET_STATE", "") or "unknown").strip().lower()
-    return s if s in RISK_PCT_BY_MARKET else "unknown"
+    if s in ("strong", "neutral", "weak"):
+        return s
+    return _auto_detect_market_state()
 
 
 def _f(v: Any) -> float:
@@ -172,9 +216,11 @@ def compute_risk_plan(
     reasons: List[str] = []
 
     # ---------- 策略识别 ----------
-    trend_ok = price > ma20 and ma5 > ma10 > ma20 and (ma20p <= 0 or ma20 > ma20p)
+    ma20_up = ma20p <= 0 or ma20 > ma20p
+    trend_ok = price > ma20 and ma5 > ma10 > ma20 and ma20_up
+    breakout_trend_ok = price > ma20 and ma5 >= ma10 * 0.995 and ma20_up and not bearish
     strategy = "none"
-    if b_level > 0 and b_age is not None and 0 <= int(b_age) <= 5 and price > ma20 and (price - ma20) < 3 * atr:
+    if b_level > 0 and b_age is not None and 0 <= int(b_age) <= 5 and breakout_trend_ok and (price - ma20) < 3 * atr:
         strategy = "breakout"
     elif trend_ok and (price - ma20) <= 2 * atr:
         strategy = "pullback"
@@ -207,9 +253,11 @@ def compute_risk_plan(
         reasons.append("多头排列、MA20 向上、收盘在 MA20 上方 2×ATR 内")
     else:
         entry = b_level
-        stop = entry - STOP_ATR_MULT_BREAKOUT * atr
+        b_low = g("breakout_low")
+        stop_atr = entry - STOP_ATR_MULT_BREAKOUT * atr
+        stop = min(stop_atr, b_low - STOP_LOW_BUFFER_ATR * atr) if (0 < b_low <= entry) else stop_atr
         zone_lo, zone_hi = entry - 0.5 * atr, entry + 0.5 * atr
-        reasons.append(f"近 {int(b_age) + 1} 日内放量突破前 20 日高点 {_fmt(entry, price)}")
+        reasons.append(f"近 {int(b_age) + 1} 日内放量突破前 20 日高点 {_fmt(entry, price)}，且 MA20 向上")
     if zone_lo > zone_hi:
         zone_lo, zone_hi = zone_hi, zone_lo
     stop = max(stop, 0.0001)
@@ -251,12 +299,16 @@ def compute_risk_plan(
         reasons.append("上方无结构压力：不人为设目标，按追踪止损退出（突破型）")
 
     # ---------- 状态判定 ----------
+    # 实盘纪律：要给 ok（直接出手），计划盈亏比与现价盈亏比都必须 ≥ 2.0（无结构目标走追踪止损除外）。
+    # 1.5 <= rr_plan < 2.0 空间偏鸡肋，一律只给 watch 观察，绝不进「可以出手」。
+    plan_strong = rr_plan is None or rr_plan >= RR_WAIT_PLAN
+    now_strong = rr_now is None or rr_now >= RR_OK_NOW
     state, text = "skip", ""
     if rr_plan is not None and rr_plan < RR_MIN_PLAN:
         state, text = "skip", f"计划盈亏比 1:{rr_plan:.2f} 低于 {RR_MIN_PLAN}，上方空间不足"
         reasons.append(f"结构目标 {_fmt(target, price)}（{target_label}）太近")
     elif price < stop:
-        state, text = "skip", ("跌破突破位 1×ATR，突破失败" if strategy == "breakout" else "已跌破止损位，计划失效")
+        state, text = "skip", ("跌破突破止损位，突破失败" if strategy == "breakout" else "已跌破止损位，计划失效")
     elif strategy == "pullback":
         entered = last_low > 0 and last_low <= zone_hi or price <= zone_hi
         if not entered:
@@ -269,24 +321,30 @@ def compute_risk_plan(
                 state, text = "watch", "已进入入场区，等收盘站回 MA5 或收阳确认止跌"
             elif price > entry + 1.0 * atr:
                 state, text = "expired", "确认后价格已超出计划入场价 1×ATR，不追"
-            elif price <= entry + 0.5 * atr and (rr_now is None or rr_now >= RR_OK_NOW):
-                state, text = "ok", "止跌已确认，价格仍在入场价 0.5×ATR 内，可按计划入场"
-            elif rr_plan is None or rr_plan >= RR_WAIT_PLAN:
-                state, text = "wait", (f"现价追入盈亏比 1:{rr_now:.2f} 不足 {RR_OK_NOW}，等回到入场区" if rr_now is not None
-                                       else "价格偏离入场价，等回到入场区")
+            elif not plan_strong:
+                state, text = "watch", f"计划盈亏比 1:{rr_plan:.2f} 不足 2.0（空间偏近），仅观察不出手"
+            elif price <= entry + 0.5 * atr and now_strong:
+                state, text = "ok", "止跌已确认，盈亏比 ≥ 2.0，价格仍在入场价 0.5×ATR 内，可按计划入场"
             else:
-                state, text = "watch", f"计划盈亏比 1:{rr_plan:.2f} 在 1.5～2 之间，仅观察"
+                state, text = "wait", (f"现价追入盈亏比 1:{rr_now:.2f} 不足 {RR_OK_NOW:.1f}，等回到入场区" if rr_now is not None
+                                       else "价格偏离入场价，等回到入场区")
     else:  # breakout
         if price > zone_hi:
-            if rr_plan is None or rr_plan >= RR_WAIT_PLAN:
+            if plan_strong:
                 state, text = "wait", f"突破后未回踩，等回踩突破位 {_fmt(zone_lo, price)}～{_fmt(zone_hi, price)}"
             else:
-                state, text = "watch", f"计划盈亏比 1:{rr_plan:.2f} 在 1.5～2 之间，回踩突破位时仅观察"
+                state, text = "watch", f"计划盈亏比 1:{rr_plan:.2f} 不足 2.0（上方压力偏近），回踩时仅观察"
         elif price >= zone_lo:
-            if rr_now is None or rr_now >= RR_OK_NOW:
-                state, text = "ok", "价格回到突破位附近，可按计划入场"
+            # 突破日当天（b_age==0）放量阳线本身就是确认；次日及之后回踩突破位，必须收阳或收盘守住突破位才确认支撑有效，避免阴线暴跌接飞刀
+            b_confirmed = (int(b_age or 0) == 0) or price >= entry or (last_open > 0 and price >= last_open)
+            if not plan_strong:
+                state, text = "watch", f"计划盈亏比 1:{rr_plan:.2f} 不足 2.0（上方压力偏近），仅观察不出手"
+            elif not b_confirmed:
+                state, text = "watch", f"回踩突破位 {_fmt(entry, price)} 但当日收阴未企稳，等收阳或站回突破位再出手"
+            elif now_strong:
+                state, text = "ok", "突破回踩企稳且盈亏比 ≥ 2.0，可按计划入场"
             else:
-                state, text = "wait", f"现价追入盈亏比 1:{rr_now:.2f} 不足 {RR_OK_NOW}"
+                state, text = "wait", f"现价追入盈亏比 1:{rr_now:.2f} 不足 {RR_OK_NOW:.1f}，等更靠近突破位"
         else:
             state, text = "watch", "跌回突破位下方，突破待重新确认"
 
@@ -312,7 +370,7 @@ def compute_risk_plan(
         state, text = "skip", "仓位不足 100 股，跳过"
 
     inval = (f"收盘跌破 MA20（{_fmt(ma20, price)}）或跳空超过 0.5×ATR（{_fmt(0.5 * atr, price)}）时重算"
-             if strategy == "pullback" else f"收盘跌破 {_fmt(stop, price)}（突破位−1×ATR）视为突破失败")
+             if strategy == "pullback" else f"收盘跌破 {_fmt(stop, price)}（突破止损位）视为突破失败")
     base.update(state=state, state_text=text, reasons=reasons, invalidation=inval)
     return base
 
