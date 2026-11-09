@@ -51,14 +51,20 @@ jobs:
               | sort_by(.tag_name) | last')
           test "$RELEASE" != "null"
           MANIFEST_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name=="qlib_bin.manifest.json") | .browser_download_url')
+          MANIFEST_API_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name=="qlib_bin.manifest.json") | .url')
           ARCHIVE_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name=="qlib_bin.tar.gz") | .browser_download_url')
-          curl -fsSL "$MANIFEST_URL" -o /tmp/qlib_manifest.json
+          ARCHIVE_API_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name=="qlib_bin.tar.gz") | .url')
+          if ! curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 --retry-all-errors \
+            "$MANIFEST_URL" -o /tmp/qlib_manifest.json; then
+            gh api -H "Accept: application/octet-stream" "$MANIFEST_API_URL" > /tmp/qlib_manifest.json
+          fi
           ARCHIVE_SHA=$(jq -r '.archive_sha256 | sub("^sha256:";"")' /tmp/qlib_manifest.json)
           TARGET_DATE=$(jq -r '.target_trade_date' /tmp/qlib_manifest.json)
           MONTH=$(date -u +%Y-%m)
           {
             echo "manifest_url=$MANIFEST_URL"
             echo "archive_url=$ARCHIVE_URL"
+            echo "archive_api_url=$ARCHIVE_API_URL"
             echo "archive_sha=$ARCHIVE_SHA"
             echo "target_date=$TARGET_DATE"
             echo "month=$MONTH"
@@ -73,11 +79,15 @@ jobs:
 
       - name: 下载并验证 Qlib 行情数据
         if: steps.data-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python -m pip install requests==2.32.5
           python scripts/prepare_qlib_data.py \
             --manifest-url "${{ steps.data.outputs.manifest_url }}" \
+            --manifest-file /tmp/qlib_manifest.json \
             --archive-url "${{ steps.data.outputs.archive_url }}" \
+            --archive-fallback-url "${{ steps.data.outputs.archive_api_url }}" \
             --destination "$HOME/.qlib/qlib_data/cn_data" \
             --metadata-out data/qlib_manifest.json
 

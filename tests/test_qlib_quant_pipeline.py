@@ -6,7 +6,7 @@ import tarfile
 
 import pandas as pd
 
-from scripts.prepare_qlib_data import _find_cn_data, _safe_extract, _sha256
+from scripts.prepare_qlib_data import _download_with_fallback, _find_cn_data, _safe_extract, _sha256
 from scripts.qlib_quant_pipeline import _merge_portfolio_metrics, _publish, _top3
 from src.quant.qlib_gate import evaluate_qlib_gate
 
@@ -122,6 +122,23 @@ def test_safe_extract_rejects_symlink(tmp_path: Path) -> None:
         assert False, "expected symlink rejection"
     except RuntimeError:
         pass
+
+
+def test_download_switches_to_fallback_source(tmp_path: Path, monkeypatch) -> None:
+    calls = []
+
+    def fake_download(url, destination, token=""):
+        calls.append((url, token))
+        if url == "primary":
+            raise OSError("timeout")
+        destination.write_bytes(b"ok")
+
+    monkeypatch.setattr("scripts.prepare_qlib_data._download", fake_download)
+    destination = tmp_path / "archive"
+    used = _download_with_fallback(["primary", "fallback"], destination, "token")
+    assert used == "fallback"
+    assert destination.read_bytes() == b"ok"
+    assert calls == [("primary", "token"), ("fallback", "token")]
 
 
 def test_find_cn_data_and_sha256(tmp_path: Path) -> None:
