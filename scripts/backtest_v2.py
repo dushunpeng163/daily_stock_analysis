@@ -14,6 +14,8 @@ import re
 import sys
 from typing import Dict, List, Tuple
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -22,6 +24,7 @@ from src.core.v2_strategy_backtest import (  # noqa: E402
     V2BacktestConfig,
     infer_historical_market_state,
     run_v2_symbol_backtest,
+    select_v2_portfolio_trades,
     summarise_v2_backtest,
 )
 
@@ -70,9 +73,13 @@ def _render_markdown(payload: Dict) -> str:
         "",
         f"- 区间：{payload['period']['start']} ～ {payload['period']['end']}",
         f"- 标的：{', '.join(payload['codes'])}",
+        f"- 组合约束：同时最多 {s['max_positions']} 只（因名额不足跳过 {s['rejected_by_max_positions']} 笔）",
         f"- 成交笔数：{s['trade_count']}",
         f"- 胜率：{s['win_rate_pct'] if s['win_rate_pct'] is not None else '—'}%",
         f"- 净收益：{s['net_pnl']:.2f} 元（{s['net_return_pct']}%）",
+        f"- 年化收益（按回测区间折算）：{s['annualized_return_pct']}%",
+        f"- 沪深300同期收益：{s['benchmark_return_pct'] if s['benchmark_return_pct'] is not None else '—'}%",
+        f"- 相对沪深300：{s['excess_return_pct'] if s['excess_return_pct'] is not None else '—'}%",
         f"- 单笔期望：{s['expectancy_per_trade'] if s['expectancy_per_trade'] is not None else '—'} 元",
         f"- 盈利因子：{s['profit_factor'] if s['profit_factor'] is not None else '—'}",
         f"- 已实现资金曲线最大回撤：{s['max_realized_drawdown_pct']}%",
@@ -98,13 +105,12 @@ def _render_markdown(payload: Dict) -> str:
         "## 逐笔交易",
         "",
     ]
-    for result in payload["results"]:
-        for trade in result["trades"]:
-            lines.append(
-                f"- {trade['code']} {trade['entry_date']}→{trade['exit_date']} "
-                f"{trade['shares']}股｜{trade['exit_reason']}｜净盈亏 {trade['net_pnl']:+.2f}元 "
-                f"({trade['return_pct']:+.2f}%)"
-            )
+    for trade in payload["portfolio_trades"]:
+        lines.append(
+            f"- {trade['code']} {trade['entry_date']}→{trade['exit_date']} "
+            f"{trade['shares']}股｜{trade['exit_reason']}｜净盈亏 {trade['net_pnl']:+.2f}元 "
+            f"({trade['return_pct']:+.2f}%)"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -119,6 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end", default=date.today().isoformat(), help="信号结束日期 YYYY-MM-DD")
     parser.add_argument("--account-size", type=float, default=float(os.getenv("ACCOUNT_SIZE") or 100000))
     parser.add_argument("--max-holding-days", type=int, default=40)
+    parser.add_argument("--max-positions", type=int, default=3)
     parser.add_argument("--commission-rate", type=float, default=0.00025)
     parser.add_argument("--min-commission", type=float, default=5.0)
     parser.add_argument("--stamp-duty-rate", type=float, default=0.0005)
@@ -181,13 +188,36 @@ def main() -> int:
             logger.exception("%s 回测失败", code)
             errors.append({"code": code, "error": f"{type(exc).__name__}: {exc}"})
 
-    summary = summarise_v2_backtest(results, cfg.account_size)
+    summary = summarise_v2_backtest(results, cfg.account_size, max_positions=args.max_positions)
+    portfolio_trades, _ = select_v2_portfolio_trades(results, max_positions=args.max_positions)
+    period_days = max(1, (end - start).days)
+    net_return = float(summary.get("net_return_pct") or 0)
+    summary["annualized_return_pct"] = round(
+        ((1.0 + net_return / 100.0) ** (365.0 / period_days) - 1.0) * 100.0,
+        2,
+    )
+    benchmark_return = None
+    if benchmark_frames:
+        benchmark = benchmark_frames[0].copy()
+        benchmark["date"] = pd.to_datetime(benchmark["date"]).dt.date
+        benchmark = benchmark[(benchmark["date"] >= start) & (benchmark["date"] <= end)]
+        if len(benchmark) >= 2:
+            first_close = float(benchmark["close"].iloc[0])
+            last_close = float(benchmark["close"].iloc[-1])
+            if first_close > 0:
+                benchmark_return = round((last_close / first_close - 1.0) * 100.0, 2)
+    summary["benchmark_return_pct"] = benchmark_return
+    summary["excess_return_pct"] = (
+        round(net_return - benchmark_return, 2) if benchmark_return is not None else None
+    )
+    summary["trades_per_year"] = round(summary["trade_count"] / (period_days / 365.0), 2)
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "period": {"start": start.isoformat(), "end": end.isoformat()},
         "codes": [code for code, _ in codes],
         "config": cfg.__dict__,
         "summary": summary,
+        "portfolio_trades": portfolio_trades,
         "results": results,
         "errors": errors,
     }
