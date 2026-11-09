@@ -8,6 +8,7 @@ from src.core.v2_strategy_backtest import (
     V2BacktestConfig,
     infer_historical_market_state,
     run_v2_symbol_backtest,
+    select_v2_portfolio_trades,
     summarise_v2_backtest,
 )
 from src.risk_levels import _limit_pct
@@ -206,5 +207,32 @@ def test_summary_includes_cost_adjusted_validation() -> None:
     assert summary["win_rate_pct"] == 50
     assert summary["expectancy_per_trade"] == 25
     assert summary["profit_factor"] == 2
+    assert summary["candidate_trade_count"] == 2
+    assert summary["rejected_by_max_positions"] == 0
     assert summary["validation"]["positive_expectancy"] is True
     assert summary["validation"]["sample_size_100"] is False
+
+
+def test_portfolio_selection_enforces_three_concurrent_positions() -> None:
+    results = [
+        {
+            "trades": [
+                {
+                    "code": code,
+                    "entry_date": "2026-01-02",
+                    "exit_date": "2026-01-10",
+                    "net_pnl": 10,
+                    "costs": 1,
+                    "exit_reason": "target",
+                }
+            ]
+        }
+        for code in ("A", "B", "C", "D")
+    ]
+    accepted, rejected = select_v2_portfolio_trades(results, max_positions=3)
+    assert [trade["code"] for trade in accepted] == ["A", "B", "C"]
+    assert rejected == 1
+    summary = summarise_v2_backtest(results, 100000, max_positions=3)
+    assert summary["trade_count"] == 3
+    assert summary["candidate_trade_count"] == 4
+    assert summary["rejected_by_max_positions"] == 1
