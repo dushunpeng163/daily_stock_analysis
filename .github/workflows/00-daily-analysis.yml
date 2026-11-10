@@ -1,9 +1,12 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  # 定时触发（工作日两跑）
+  #   20:30 北京 = UTC 12:30  完整分析：个股 + 大盘复盘。此时当日筹码/龙虎榜/板块资金已更新，当天多数公告已发布
+  #   08:20 北京 = UTC 00:20  仅个股：覆盖前一晚 20:30 之后与当天早间发布的公告（减持/业绩预告等多在此时段），开盘前排雷
   schedule:
-    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+    - cron: '30 12 * * 1-5'
+    - cron: '20 0 * * 1-5'
   
   # 手动触发
   workflow_dispatch:
@@ -503,8 +506,11 @@ jobs:
             echo "✅ LITELLM 配置文件已写入: $LITELLM_CONFIG"
           fi
 
-          # 判断运行模式
+          # 判断运行模式：手动按输入；定时按触发的 cron 区分（早间跑只做个股）
           MODE="${{ github.event.inputs.mode || 'full' }}"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "20 0 * * 1-5" ]; then
+            MODE="stocks-only"
+          fi
           
           echo "=========================================="
           echo "🚀 A股自选股智能分析系统"
