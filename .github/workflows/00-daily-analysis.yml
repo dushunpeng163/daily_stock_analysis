@@ -474,8 +474,13 @@ jobs:
           AKSHARE_HISTORY_CALL_TIMEOUT: '25'
           # 策略 V2：账户规模（仓位反推）、日线历史长度（120 日结构位）、市场状态（阶段 2 接入）
           ACCOUNT_SIZE: ${{ vars.ACCOUNT_SIZE || '100000' }}
-          DAILY_HISTORY_DAYS: '130'
+          # 300 个交易日：长线体检需要 MA250；V2 结构位需要 120
+          DAILY_HISTORY_DAYS: '300'
           MARKET_STATE: ${{ vars.MARKET_STATE || 'unknown' }}
+          # 长线体检参数：止损容忍度 / 回撤注意线 / 回撤警报线（小数）
+          LONG_TERM_STOP_PCT: ${{ vars.LONG_TERM_STOP_PCT || '0.20' }}
+          LONG_TERM_DD_CAUTION: ${{ vars.LONG_TERM_DD_CAUTION || '0.25' }}
+          LONG_TERM_DD_ALERT: ${{ vars.LONG_TERM_DD_ALERT || '0.35' }}
           
         run: |
           # 解析自选股配置：

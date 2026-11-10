@@ -109,6 +109,7 @@ from src.services.decision_signal_summary import summarize_decision_signal
 from src.enums import ReportType
 from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
 from src.risk_levels import apply_atr_risk_levels
+from src.long_term import apply_long_term_health
 from src.core.trading_calendar import (
     build_market_phase_context,
     get_effective_trading_date,
@@ -648,6 +649,7 @@ class StockAnalysisPipeline:
 
             # Step 3: 趋势分析（基于交易理念）— 在 Agent 分支之前执行，供两条路径共用
             trend_result: Optional[TrendAnalysisResult] = None
+            long_term_df = None  # 长线体检复用同一份日线
             try:
                 from src.services.history_loader import get_frozen_target_date
                 _mkt = get_market_for_stock(normalize_stock_code(code))
@@ -662,6 +664,7 @@ class StockAnalysisPipeline:
                         df = self._augment_historical_with_realtime(
                             df, realtime_quote, code, market=market
                         )
+                    long_term_df = df
                     trend_result = self.trend_analyzer.analyze(df, code)
                     logger.info(f"{stock_name}({code}) 趋势分析: {trend_result.trend_status.value}, "
                               f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}")
@@ -925,6 +928,7 @@ class StockAnalysisPipeline:
             if result:
                 fill_price_position_if_needed(result, trend_result, realtime_quote)
                 apply_atr_risk_levels(result, trend_result)
+                apply_long_term_health(result, long_term_df, chip=chip_data, news_context=news_context, trend_result=trend_result)
                 action_source_advice = getattr(result, "operation_advice", None)
                 stabilize_decision_with_structure(result, trend_result, fundamental_context)
                 adjustments = apply_phase_decision_guardrails(

@@ -1535,6 +1535,14 @@ class NotificationService(
                             report_lines.extend(render_risk_plan_markdown(risk_plan))
                         except Exception:  # noqa: BLE001
                             pass
+                    # 长线体检（持仓数月以上）
+                    long_term = battle.get('long_term')
+                    if isinstance(long_term, dict) and long_term:
+                        try:
+                            from src.long_term import render_long_term_markdown
+                            report_lines.extend(render_long_term_markdown(long_term))
+                        except Exception:  # noqa: BLE001
+                            pass
                     # 仓位策略
                     position = battle.get('position_strategy', {})
                     if position:
