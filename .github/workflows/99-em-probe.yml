@@ -1,0 +1,80 @@
+name: 东方财富连通性自检（临时）
+
+# 临时诊断用：在自建 runner 上实测东方财富 K 线/筹码接口哪种请求方式能通。只能手动触发，不做分析、不推送。
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 8
+    steps:
+      - name: 实测
+        run: |
+          PY=/opt/actions-runner/_work/_tool/dsa-venv/bin/python
+          [ -x "$PY" ] || PY=python3
+          "$PY" - <<'EOF'
+          import random, time, json
+          import requests
+
+          UT = "fa5fd1943c7b386f172d6893dbfba10b"
+          BROWSER = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                     "Referer": "https://quote.eastmoney.com/", "Accept": "*/*", "Accept-Language": "zh-CN,zh;q=0.9"}
+          T0 = time.time()
+
+          def kline(host, secid, headers=None, lmt=210, scheme="https", session=None, extra=None):
+              params = {"secid": secid, "ut": UT, "fields1": "f1,f2,f3,f4,f5,f6", "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+                        "klt": "101", "fqt": "1", "end": "20500101", "lmt": str(lmt)}
+              params.update(extra or {})
+              t = time.time()
+              try:
+                  r = (session or requests).get(f"{scheme}://{host}/api/qt/stock/kline/get", params=params, headers=headers, timeout=10)
+                  n = len((r.json().get("data") or {}).get("klines") or [])
+                  return f"OK   http={r.status_code} klines={n} {time.time() - t:.2f}s"
+              except Exception as e:
+                  return f"FAIL {type(e).__name__}: {str(e)[:70]} {time.time() - t:.2f}s"
+
+          def show(label, res):
+              print(f"[{time.time() - T0:6.1f}s] {label:<46} {res}", flush=True)
+
+          print("== 1. 同一请求，不同请求头 / 主机 / 协议 ==")
+          show("默认 python-requests 头 https", kline("push2his.eastmoney.com", "1.600519"))
+          show("浏览器头 https", kline("push2his.eastmoney.com", "1.600519", BROWSER))
+          show("浏览器头 http", kline("push2his.eastmoney.com", "1.600519", BROWSER, scheme="http"))
+          for n in random.sample(range(1, 100), 4):
+              show(f"浏览器头 https 节点 {n}.push2his", kline(f"{n}.push2his.eastmoney.com", "1.600519", BROWSER))
+          s = requests.Session(); s.headers.update(BROWSER)
+          try:
+              s.get("https://quote.eastmoney.com/sh600519.html", timeout=10)
+              print("   先访问行情页拿 cookie:", list(s.cookies.keys())[:8])
+          except Exception as e:
+              print("   行情页访问失败:", type(e).__name__)
+          show("带行情页 cookie 的会话", kline("push2his.eastmoney.com", "1.600519", session=s))
+          try:
+              r = requests.get("https://push2.eastmoney.com/api/qt/stock/get", params={"secid": "1.600519", "ut": UT, "fields": "f43,f47,f48,f58"}, headers=BROWSER, timeout=10)
+              show("对照：push2 实时接口", f"OK   http={r.status_code} len={len(r.text)}")
+          except Exception as e:
+              show("对照：push2 实时接口", f"FAIL {type(e).__name__}: {str(e)[:70]}")
+
+          print("== 2. akshare 筹码接口（逐只，间隔 6 秒） ==")
+          try:
+              import akshare as ak
+              print("   akshare", ak.__version__)
+              for code in ("600519", "000568", "002304"):
+                  t = time.time()
+                  try:
+                      df = ak.stock_cyq_em(symbol=code)
+                      show(f"ak.stock_cyq_em({code})", f"OK   rows={len(df)} {time.time() - t:.2f}s")
+                  except Exception as e:
+                      show(f"ak.stock_cyq_em({code})", f"FAIL {type(e).__name__}: {str(e)[:70]} {time.time() - t:.2f}s")
+                  time.sleep(6)
+          except Exception as e:
+              print("   akshare 不可用:", type(e).__name__, e)
+
+          print("== 3. 间隔重试能否恢复（每 25 秒一次，共 5 次；默认头与浏览器头各一次） ==")
+          for i in range(5):
+              show(f"第 {i + 1} 次 默认头", kline("push2his.eastmoney.com", "0.000568"))
+              show(f"第 {i + 1} 次 浏览器头", kline("push2his.eastmoney.com", "0.000568", BROWSER))
+              if i < 4:
+                  time.sleep(25)
+          EOF
