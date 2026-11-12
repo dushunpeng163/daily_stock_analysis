@@ -110,6 +110,7 @@ from src.enums import ReportType
 from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
 from src.risk_levels import apply_atr_risk_levels
 from src.long_term import apply_long_term_health
+from src.utils.volume_units import align_volume_to_reference
 from src.core.trading_calendar import (
     build_market_phase_context,
     get_effective_trading_date,
@@ -1145,6 +1146,13 @@ class StockAnalysisPipeline:
                 low_p = getattr(realtime_quote, 'low', None) or price
                 vol = getattr(realtime_quote, 'volume', None)
                 amt = getattr(realtime_quote, 'amount', None)
+                # 实时成交量（腾讯=股）与历史日线（东财=手）单位可能不同，先换算到历史口径，
+                # 否则「较昨日 N 倍」会被放大 100 倍并触发「量能异常、降权」
+                yest_row = enhanced.get('yesterday') if isinstance(enhanced.get('yesterday'), dict) else {}
+                vol = align_volume_to_reference(
+                    vol, amt, price,
+                    yest_row.get('volume'), yest_row.get('amount'), yest_row.get('close'),
+                )
                 pct = getattr(realtime_quote, 'change_pct', None)
                 fetched_at = getattr(realtime_quote, 'fetched_at', None)
                 provider_timestamp = getattr(realtime_quote, 'provider_timestamp', None)
