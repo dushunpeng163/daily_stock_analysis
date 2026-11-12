@@ -194,6 +194,71 @@ def _f(v: Any) -> float:
         return 0.0
 
 
+REF_NOTE = "参考位，当前不建议出手"
+
+
+def _reference_levels(
+    price: float, atr: float, ma5: float, ma10: float, ma20: float,
+    low10: float, h20: float, h60: float, swing_highs: List[float], extended: bool,
+) -> Optional[Dict[str, Any]]:
+    """没有合格买点（skip 且未算出入场价）时的参考价位：只供查看，不是交易计划，不参与仓位与盈亏比。
+
+    extended=True  趋势向上但离 MA20 超过 2×ATR：参考买入区 = 回落到 MA20+2×ATR 以内、靠近 MA5/MA10 的区间
+    extended=False 趋势条件不满足：
+        现价 ≤ MA20  → 参考买入条件 = 收盘站回 MA20 上方（单一价位）
+        现价 > MA20  → 参考买入区 = MA5/MA10 附近（需先恢复多头排列且 MA20 向上）
+    参考止损：extended 时按参考入场价下方 1.5×ATR 与 10 日低点下方 0.3×ATR 取低；否则取 10 日低点下方 0.3×ATR。
+    上方压力：现价上方最近的结构高点（前 20/60 日高点、120 日内波段高点；现价在 MA20 下方时取 MA20 之上的）。
+    """
+    try:
+        if price <= 0 or atr <= 0:
+            return None
+        ref: Dict[str, Any] = {"zone": None, "level": None, "buy_label": "", "stop": None, "stop_label": "",
+                               "resistance": None, "res_label": "", "note": REF_NOTE}
+        low_ok = 0 < low10 < price
+        if extended:
+            hi = min(ma5 + ZONE_ATR * atr, ma20 + 2 * atr)
+            lo = min(ma10 - ZONE_ATR * atr, hi)
+            if lo >= hi:
+                lo = hi - 0.5 * atr
+            ref["zone"] = (lo, hi)
+            ref["buy_label"] = "回落到 MA20 上方 2×ATR 以内、靠近 MA5/MA10"
+            entry_ref = min(ma5, hi)
+            low_ref = low10 if low_ok else entry_ref - atr
+            ref["stop"] = min(entry_ref - STOP_ATR_MULT_PULLBACK * atr, low_ref - STOP_LOW_BUFFER_ATR * atr)
+            ref["stop_label"] = "参考入场价下方 1.5×ATR 与 10 日低点下方 0.3×ATR 取低"
+        elif price <= ma20:
+            ref["level"] = ma20
+            ref["buy_label"] = "收盘站回 MA20 上方且均线转为多头排列后再评估"
+        else:
+            lo = max(ma20, min(ma5, ma10) - ZONE_ATR * atr)
+            hi = max(ma5, ma10) + ZONE_ATR * atr
+            if lo >= hi:
+                lo = hi - 0.5 * atr
+            ref["zone"] = (lo, hi)
+            ref["buy_label"] = "需先恢复 MA5>MA10>MA20 且 MA20 向上，再回踩 MA5/MA10"
+        if ref["stop"] is None:
+            ref["stop"] = (low10 - STOP_LOW_BUFFER_ATR * atr) if low_ok else (price - STOP_ATR_MULT_PULLBACK * atr)
+            ref["stop_label"] = "近 10 日低点下方 0.3×ATR（持仓者参考）" if low_ok else "现价下方 1.5×ATR（持仓者参考）"
+        ref["stop"] = max(ref["stop"], 0.0001)
+
+        cands: List[Tuple[float, str]] = []
+        if h20 > 0:
+            cands.append((h20, "前20日高点"))
+        if h60 > 0:
+            cands.append((h60, "前60日高点"))
+        cands += [(v, "120日内波段高点") for v in swing_highs]
+        # 现价在 MA20 下方时，MA20 本身就是「参考买入条件」那一行的价位，压力取它之上的结构高点，避免两行同一个数
+        res_floor = max(price, ma20) if price <= ma20 else price
+        cands = [(v, lb) for v, lb in cands if v > res_floor]
+        if cands:
+            ref["resistance"], ref["res_label"] = min(cands, key=lambda x: x[0])
+        return ref
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[risk_levels] 参考价位计算失败: %s", exc)
+        return None
+
+
 def compute_risk_plan(
     price: float,
     tr: Any,
@@ -265,11 +330,13 @@ def compute_risk_plan(
             reasons.append("MA20 未向上（较 5 日前走平或下行）")
         elif (price - ma20) > 2 * atr:
             reasons.append(f"距 MA20 超过 2×ATR（{_fmt(price - ma20, price)}），追高风险")
-            base.update(state="skip", state_text="趋势向上但离 MA20 过远，不追高，等回落到 MA5/MA10 附近再评估", reasons=reasons)
+            base.update(state="skip", state_text="趋势向上但离 MA20 过远，不追高，等回落到 MA5/MA10 附近再评估", reasons=reasons,
+                        ref=_reference_levels(price, atr, ma5, ma10, ma20, low10, h20, h60, swing_highs, extended=True))
             return base
         else:
             reasons.append("趋势条件不满足")
-        base.update(state="skip", state_text="趋势条件不满足，不出手", reasons=reasons)
+        base.update(state="skip", state_text="趋势条件不满足，不出手", reasons=reasons,
+                    ref=_reference_levels(price, atr, ma5, ma10, ma20, low10, h20, h60, swing_highs, extended=False))
         return base
 
     base.update(strategy=strategy, strategy_label=STRATEGY_LABEL[strategy])
@@ -437,7 +504,10 @@ def apply_atr_risk_levels(result: Any, trend_result: Any) -> None:
         price = plan["price"]
         f = lambda v: _fmt(v, price)  # noqa: E731
         if plan["state"] == "na" or plan.get("entry") is None:
-            sniper["ideal_buy"] = f"不适用（{plan['state_text']}）" if plan["state"] == "na" else f"暂无（{plan['state_text']}）"
+            # 注意：这里故意不写入任何价格数字。下游 extract_sniper_points 会把本表里的数字当作真实买点/止损入库并生成决策信号，
+            # 参考价位只写在 risk_plan["ref"] 里，由「交易计划 V2」段渲染。
+            ref_hint = "；参考价位见下方交易计划" if plan.get("ref") else ""
+            sniper["ideal_buy"] = f"不适用（{plan['state_text']}）" if plan["state"] == "na" else f"暂无（{plan['state_text']}{ref_hint}）"
             sniper["secondary_buy"] = "—"
             sniper["stop_loss"] = "—"
             sniper["take_profit"] = "—"
@@ -488,6 +558,20 @@ def render_risk_plan_markdown(plan: Dict[str, Any]) -> list:
         else:
             lines.append(f"- **建议仓位**: 0股（账户风险 {plan['risk_pct']:.2f}% ≈ {plan['risk_amount']:.0f}元 不足 100 股）")
         lines.append(f"- **失效条件**: {plan['invalidation']}")
+    elif plan["state"] != "na" and plan.get("ref"):
+        # 没有合格买点：只给参考价位（看板解析契约：键名「参考买入 / 参考止损 / 上方压力」勿改）
+        ref = plan["ref"]
+        if ref.get("zone"):
+            lo, hi = ref["zone"]
+            lines.append(f"- **参考买入**: {f(lo)}～{f(hi)}（{ref['buy_label']}；{ref['note']}）")
+        elif ref.get("level"):
+            lines.append(f"- **参考买入**: 站回 {f(ref['level'])} 上方（{ref['buy_label']}；{ref['note']}）")
+        if ref.get("stop"):
+            lines.append(f"- **参考止损**: {f(ref['stop'])}（{ref['stop_label']}，距现价{_spct(ref['stop'], price)}）")
+        if ref.get("resistance"):
+            lines.append(f"- **上方压力**: {f(ref['resistance'])}（{ref['res_label']}，距现价{_spct(ref['resistance'], price)}）")
+        else:
+            lines.append("- **上方压力**: 无（现价上方 120 日内无结构高点）")
     if plan.get("reasons"):
         lines.append(f"- **判定依据**: {'；'.join(plan['reasons'])}")
     lines.append("")
