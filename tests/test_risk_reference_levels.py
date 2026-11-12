@@ -67,6 +67,17 @@ def test_real_plan_has_no_reference_block():
     assert _lines(plan, "计划入场区") and not _lines(plan, "参考买入")
 
 
+def test_stop_too_wide_still_reports_structural_target():
+    """因止损过宽放弃的计划，上方有前高时不能渲染成「无结构压力 / 追踪止损」。"""
+    tr = dict(atr14=4.69, ma5=109.26, ma10=107.9, ma20=104.0, ma20_prev5=102.0, swing_low_10=96.4,
+              high_20=113.84, high_60=137.48, swing_highs=[], last_open=108.5, last_low=107.0)
+    plan = compute_risk_plan(107.75, tr, code="688981", name="测试", account_size=100000, market_state="neutral")
+    assert plan["state"] == "skip" and "止损距离过宽" in plan["state_text"]
+    assert plan["target"] == 113.84 and plan["trailing"] is False
+    line = _lines(plan, "结构目标")[0]
+    assert "113.84" in line and "前20日高点" in line and "追踪止损" not in line
+
+
 def test_markdown_contract_and_not_recommended_note():
     for case in (EXTENDED, BELOW_MA20, NOT_ALIGNED):
         plan = _plan(case)

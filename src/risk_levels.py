@@ -364,18 +364,8 @@ def compute_risk_plan(
         base.update(state="skip", state_text="止损计算异常", reasons=reasons + ["止损价不低于入场价"])
         return base
 
-    lo_lim, hi_lim = STOP_RANGE["STOCK_ETF" if asset == "STOCK_ETF" else "STOCK"]
-    stop_pct = risk / entry
-    if stop_pct < lo_lim:
-        reasons.append(f"止损距离 {stop_pct * 100:.1f}% 低于下限 {lo_lim * 100:.0f}%，交易成本与噪声占比过高")
-        base.update(state="skip", state_text="止损距离过窄，不出手", reasons=reasons)
-        return base
-    if stop_pct > hi_lim:
-        reasons.append(f"止损距离 {stop_pct * 100:.1f}% 超过上限 {hi_lim * 100:.0f}%，止损过宽")
-        base.update(state="skip", state_text="止损距离过宽，放弃交易", reasons=reasons)
-        return base
-
     # ---------- 结构目标 ----------
+    # 先算目标、再做止损距离检查：否则因止损过宽/过窄放弃的计划会被渲染成「上方无结构压力」，而实际上只是没算。
     cands: List[Tuple[float, str]] = []
     if h20 > 0:
         cands.append((h20, "前20日高点"))
@@ -392,6 +382,18 @@ def compute_risk_plan(
     rr_plan = (target - entry) / risk if target else None
     rr_now = ((target - price) / (price - stop) if price > stop else 0.0) if target else None
     base.update(target=target, target_label=target_label, trailing=trailing, rr_plan=rr_plan, rr_now=rr_now)
+
+    lo_lim, hi_lim = STOP_RANGE["STOCK_ETF" if asset == "STOCK_ETF" else "STOCK"]
+    stop_pct = risk / entry
+    if stop_pct < lo_lim:
+        reasons.append(f"止损距离 {stop_pct * 100:.1f}% 低于下限 {lo_lim * 100:.0f}%，交易成本与噪声占比过高")
+        base.update(state="skip", state_text="止损距离过窄，不出手", reasons=reasons)
+        return base
+    if stop_pct > hi_lim:
+        reasons.append(f"止损距离 {stop_pct * 100:.1f}% 超过上限 {hi_lim * 100:.0f}%，止损过宽")
+        base.update(state="skip", state_text="止损距离过宽，放弃交易", reasons=reasons)
+        return base
+
     if trailing:
         reasons.append("上方无结构压力：不人为设目标，按追踪止损退出（突破型）")
 
